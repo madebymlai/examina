@@ -13,8 +13,11 @@ from pathlib import Path
 from config import Config
 from storage.database import Database
 from storage.file_manager import FileManager
+from storage.vector_store import VectorStore
 from core.pdf_processor import PDFProcessor
 from core.exercise_splitter import ExerciseSplitter
+from core.analyzer import ExerciseAnalyzer
+from models.llm_manager import LLMManager
 from study_context import study_plan
 
 console = Console()
@@ -295,6 +298,160 @@ def ingest(course, zip_file):
         console.print(f"\nNext steps:")
         console.print(f"  • examina info --course {course} - View course status")
         console.print(f"  • Phase 3: AI analysis to discover topics and core loops\n")
+
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}\n")
+        import traceback
+        traceback.print_exc()
+        raise click.Abort()
+
+
+@cli.command()
+@click.option('--course', '-c', required=True, help='Course code (e.g., B006802 or ADE)')
+@click.option('--limit', '-l', type=int, help='Limit number of exercises to analyze (for testing)')
+def analyze(course, limit):
+    """Analyze exercises with AI to discover topics and core loops."""
+    console.print(f"\n[bold cyan]Analyzing exercises for {course}...[/bold cyan]\n")
+
+    try:
+        # Find course
+        with Database() as db:
+            all_courses = db.get_all_courses()
+            found_course = None
+            for c in all_courses:
+                if c['code'] == course or c['acronym'] == course:
+                    found_course = c
+                    break
+
+            if not found_course:
+                console.print(f"[red]Course '{course}' not found.[/red]\n")
+                return
+
+            course_code = found_course['code']
+            console.print(f"Course: {found_course['name']} ({found_course['acronym']})\n")
+
+            # Check for exercises
+            exercises = db.get_exercises_by_course(course_code)
+            if not exercises:
+                console.print("[yellow]No exercises found. Run 'examina ingest' first.[/yellow]\n")
+                return
+
+            console.print(f"Found {len(exercises)} exercise fragments\n")
+
+        # Initialize components
+        console.print("🤖 Initializing AI components...")
+        llm = LLMManager()
+        analyzer = ExerciseAnalyzer(llm)
+        vector_store = VectorStore(llm_manager=llm)
+
+        # Check if Ollama is available
+        console.print(f"   Checking {llm.primary_model}...")
+        if not llm.check_model_available(llm.primary_model):
+            console.print(f"[red]Model {llm.primary_model} not found![/red]")
+            console.print(f"[yellow]Run: ollama pull {llm.primary_model}[/yellow]\n")
+            return
+
+        console.print(f"   ✓ {llm.primary_model} ready\n")
+
+        # Limit for testing
+        if limit:
+            exercises = exercises[:limit]
+            console.print(f"[dim]Limited to {limit} exercises for testing[/dim]\n")
+
+        # Analyze and merge
+        console.print("🔍 Analyzing and merging exercise fragments...")
+        console.print("[dim]This may take a while...[/dim]\n")
+
+        discovery_result = analyzer.discover_topics_and_core_loops(course_code)
+
+        console.print(f"✓ Merged {discovery_result['original_count']} fragments → {discovery_result['merged_count']} exercises\n")
+
+        # Display results
+        topics = discovery_result['topics']
+        core_loops = discovery_result['core_loops']
+
+        if topics:
+            console.print("[bold]📚 Discovered Topics:[/bold]")
+            for topic_name, topic_data in topics.items():
+                console.print(f"  • {topic_name} ({topic_data['exercise_count']} exercises, {len(topic_data['core_loops'])} core loops)")
+
+        if core_loops:
+            console.print(f"\n[bold]🔄 Discovered Core Loops:[/bold]")
+            for loop_id, loop_data in core_loops.items():
+                console.print(f"  • {loop_data['name']} ({loop_data['exercise_count']} exercises)")
+                if loop_data['procedure']:
+                    console.print(f"    [dim]Steps: {len(loop_data['procedure'])}[/dim]")
+
+        # Store in database
+        console.print(f"\n💾 Storing analysis results...")
+        with Database() as db:
+            # Store topics
+            for topic_name in topics.keys():
+                topic_id = db.add_topic(course_code, topic_name)
+
+            # Store core loops
+            for loop_id, loop_data in core_loops.items():
+                # Get topic_id
+                topic_name = loop_data.get('topic')
+                if topic_name:
+                    topic_rows = db.get_topics_by_course(course_code)
+                    topic_id = next((t['id'] for t in topic_rows if t['name'] == topic_name), None)
+
+                    if topic_id:
+                        db.add_core_loop(
+                            loop_id=loop_id,
+                            topic_id=topic_id,
+                            name=loop_data['name'],
+                            procedure=loop_data['procedure'],
+                            description=None
+                        )
+
+            # Update exercises with analysis
+            for merged_ex in discovery_result['merged_exercises']:
+                analysis = merged_ex.get('analysis')
+                if analysis and analysis.topic:
+                    # Get topic_id and core_loop_id
+                    topic_rows = db.get_topics_by_course(course_code)
+                    topic_id = next((t['id'] for t in topic_rows if t['name'] == analysis.topic), None)
+
+                    # Update first exercise in merged group
+                    first_id = merged_ex['merged_from'][0]
+                    db.conn.execute("""
+                        UPDATE exercises
+                        SET topic_id = ?, core_loop_id = ?, difficulty = ?, analyzed = 1
+                        WHERE id = ?
+                    """, (topic_id, analysis.core_loop_id, analysis.difficulty, first_id))
+
+            db.conn.commit()
+            console.print("   ✓ Stored in database\n")
+
+        # Build vector store
+        console.print("🧠 Building vector embeddings for RAG...")
+        vector_store.add_exercises_batch(course_code, discovery_result['merged_exercises'])
+
+        # Add core loops to vector store
+        for loop_id, loop_data in core_loops.items():
+            vector_store.add_core_loop(
+                course_code=course_code,
+                core_loop_id=loop_id,
+                name=loop_data['name'],
+                description=loop_data.get('description', ''),
+                procedure=loop_data['procedure'],
+                example_exercises=loop_data['exercises']
+            )
+
+        stats = vector_store.get_collection_stats(course_code)
+        console.print(f"   ✓ {stats.get('exercises_count', 0)} exercise embeddings")
+        console.print(f"   ✓ {stats.get('procedures_count', 0)} procedure embeddings\n")
+
+        # Summary
+        console.print("[bold green]✨ Analysis complete![/bold green]\n")
+        console.print(f"Topics: {len(topics)}")
+        console.print(f"Core loops: {len(core_loops)}")
+        console.print(f"Exercises: {discovery_result['merged_count']}\n")
+        console.print(f"Next steps:")
+        console.print(f"  • examina info --course {course} - View updated course info")
+        console.print(f"  • examina learn --course {course} - Start learning (Phase 4)\n")
 
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {e}\n")
