@@ -28,16 +28,21 @@ class LLMManager:
         """Initialize LLM manager.
 
         Args:
-            provider: LLM provider ("ollama", "anthropic", "openai")
+            provider: LLM provider ("ollama", "anthropic", "openai", "groq")
             base_url: Base URL for API (for Ollama)
         """
         self.provider = provider
         self.base_url = base_url or Config.OLLAMA_BASE_URL
 
         # Model selection
-        self.primary_model = Config.LLM_PRIMARY_MODEL  # Heavy reasoning
-        self.fast_model = Config.LLM_FAST_MODEL  # Quick tasks
-        self.embed_model = Config.LLM_EMBED_MODEL  # Embeddings
+        if provider == "groq":
+            self.primary_model = Config.GROQ_MODEL
+            self.fast_model = Config.GROQ_MODEL
+            self.embed_model = Config.LLM_EMBED_MODEL  # Still use Ollama for embeddings
+        else:
+            self.primary_model = Config.LLM_PRIMARY_MODEL  # Heavy reasoning
+            self.fast_model = Config.LLM_FAST_MODEL  # Quick tasks
+            self.embed_model = Config.LLM_EMBED_MODEL  # Embeddings
 
     def generate(self, prompt: str, model: Optional[str] = None,
                  system: Optional[str] = None,
@@ -61,6 +66,10 @@ class LLMManager:
 
         if self.provider == "ollama":
             return self._ollama_generate(
+                prompt, model, system, temperature, max_tokens, json_mode
+            )
+        elif self.provider == "groq":
+            return self._groq_generate(
                 prompt, model, system, temperature, max_tokens, json_mode
             )
         else:
@@ -144,6 +153,92 @@ class LLMManager:
                 model=model,
                 success=False,
                 error=f"Ollama error: {str(e)}"
+            )
+
+    def _groq_generate(self, prompt: str, model: str,
+                      system: Optional[str], temperature: float,
+                      max_tokens: Optional[int], json_mode: bool) -> LLMResponse:
+        """Generate using Groq API.
+
+        Args:
+            prompt: User prompt
+            model: Model name
+            system: System prompt
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens
+            json_mode: Force JSON output
+
+        Returns:
+            LLMResponse
+        """
+        try:
+            # Check for API key
+            if not Config.GROQ_API_KEY:
+                return LLMResponse(
+                    text="",
+                    model=model,
+                    success=False,
+                    error="GROQ_API_KEY not set. Get one at https://console.groq.com"
+                )
+
+            url = "https://api.groq.com/openai/v1/chat/completions"
+
+            messages = []
+            if system:
+                messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": prompt})
+
+            payload = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+            }
+
+            if max_tokens:
+                payload["max_tokens"] = max_tokens
+
+            if json_mode:
+                payload["response_format"] = {"type": "json_object"}
+
+            headers = {
+                "Authorization": f"Bearer {Config.GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            }
+
+            response = requests.post(url, json=payload, headers=headers, timeout=60)
+            response.raise_for_status()
+
+            result = response.json()
+            text = result["choices"][0]["message"]["content"]
+
+            return LLMResponse(
+                text=text,
+                model=model,
+                success=True,
+                metadata={
+                    "usage": result.get("usage"),
+                    "finish_reason": result["choices"][0].get("finish_reason"),
+                }
+            )
+
+        except requests.exceptions.HTTPError as e:
+            error_msg = f"Groq API error: {e}"
+            if e.response.status_code == 401:
+                error_msg = "Invalid GROQ_API_KEY. Check your API key."
+            elif e.response.status_code == 429:
+                error_msg = "Rate limit exceeded. Wait a moment and try again."
+            return LLMResponse(
+                text="",
+                model=model,
+                success=False,
+                error=error_msg
+            )
+        except Exception as e:
+            return LLMResponse(
+                text="",
+                model=model,
+                success=False,
+                error=f"Groq error: {str(e)}"
             )
 
     def embed(self, text: str, model: Optional[str] = None) -> Optional[List[float]]:

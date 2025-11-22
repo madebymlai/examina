@@ -309,7 +309,9 @@ def ingest(course, zip_file):
 @cli.command()
 @click.option('--course', '-c', required=True, help='Course code (e.g., B006802 or ADE)')
 @click.option('--limit', '-l', type=int, help='Limit number of exercises to analyze (for testing)')
-def analyze(course, limit):
+@click.option('--provider', '-p', type=click.Choice(['ollama', 'groq']), default='groq',
+              help='LLM provider (default: groq)')
+def analyze(course, limit, provider):
     """Analyze exercises with AI to discover topics and core loops."""
     console.print(f"\n[bold cyan]Analyzing exercises for {course}...[/bold cyan]\n")
 
@@ -339,19 +341,30 @@ def analyze(course, limit):
             console.print(f"Found {len(exercises)} exercise fragments\n")
 
         # Initialize components
-        console.print("🤖 Initializing AI components...")
-        llm = LLMManager()
+        console.print(f"🤖 Initializing AI components (provider: {provider})...")
+        llm = LLMManager(provider=provider)
         analyzer = ExerciseAnalyzer(llm)
-        vector_store = VectorStore(llm_manager=llm)
 
-        # Check if Ollama is available
-        console.print(f"   Checking {llm.primary_model}...")
-        if not llm.check_model_available(llm.primary_model):
-            console.print(f"[red]Model {llm.primary_model} not found![/red]")
-            console.print(f"[yellow]Run: ollama pull {llm.primary_model}[/yellow]\n")
-            return
+        # For embeddings, we still need Ollama
+        embed_llm = LLMManager(provider="ollama") if provider == "groq" else llm
+        vector_store = VectorStore(llm_manager=embed_llm)
 
-        console.print(f"   ✓ {llm.primary_model} ready\n")
+        # Check if provider is ready
+        if provider == "ollama":
+            console.print(f"   Checking {llm.primary_model}...")
+            if not llm.check_model_available(llm.primary_model):
+                console.print(f"[red]Model {llm.primary_model} not found![/red]")
+                console.print(f"[yellow]Run: ollama pull {llm.primary_model}[/yellow]\n")
+                return
+            console.print(f"   ✓ {llm.primary_model} ready\n")
+        elif provider == "groq":
+            console.print(f"   Using Groq API with {llm.primary_model}")
+            if not Config.GROQ_API_KEY:
+                console.print(f"[red]GROQ_API_KEY not set![/red]")
+                console.print(f"[yellow]Get your free API key at: https://console.groq.com[/yellow]")
+                console.print(f"[yellow]Then set it: export GROQ_API_KEY=your_key_here[/yellow]\n")
+                return
+            console.print(f"   ✓ API key found\n")
 
         # Limit for testing
         if limit:

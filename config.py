@@ -28,6 +28,10 @@ class Config:
     # API Keys (optional fallback)
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+    # Groq Settings
+    GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")  # Fast and capable
 
     # Processing Settings
     PDF_MAX_SIZE_MB = 50
