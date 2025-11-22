@@ -230,6 +230,8 @@ Respond ONLY with valid JSON, no other text.
                 current_merge["text"] += "\n\n" + exercise["text"]
                 current_merge["merged_from"].append(exercise["id"])
                 if exercise.get("image_paths"):
+                    if not current_merge.get("image_paths"):
+                        current_merge["image_paths"] = []
                     current_merge["image_paths"].extend(exercise["image_paths"])
             else:
                 # Save previous merge if exists
