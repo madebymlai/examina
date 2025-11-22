@@ -313,7 +313,12 @@ def ingest(course, zip_file):
               help='LLM provider (default: anthropic)')
 @click.option('--lang', type=click.Choice(['en', 'it']), default='en',
               help='Output language for analysis (default: en)')
-def analyze(course, limit, provider, lang):
+@click.option('--force', '-f', is_flag=True, help='Force re-analysis of all exercises (ignore existing analysis)')
+@click.option('--parallel/--sequential', default=True,
+              help='Use parallel batch processing for better performance (default: parallel)')
+@click.option('--batch-size', '-b', type=int, default=None,
+              help=f'Batch size for parallel processing (default: {Config.BATCH_SIZE})')
+def analyze(course, limit, provider, lang, force, parallel, batch_size):
     """Analyze exercises with AI to discover topics and core loops."""
     console.print(f"\n[bold cyan]Analyzing exercises for {course}...[/bold cyan]\n")
 
@@ -334,13 +339,38 @@ def analyze(course, limit, provider, lang):
             course_code = found_course['code']
             console.print(f"Course: {found_course['name']} ({found_course['acronym']})\n")
 
-            # Check for exercises
-            exercises = db.get_exercises_by_course(course_code)
-            if not exercises:
+            # Check for exercises and analyze resume capability
+            all_exercises = db.get_exercises_by_course(course_code)
+            if not all_exercises:
                 console.print("[yellow]No exercises found. Run 'examina ingest' first.[/yellow]\n")
                 return
 
-            console.print(f"Found {len(exercises)} exercise fragments\n")
+            analyzed_exercises = db.get_exercises_by_course(course_code, analyzed_only=True)
+            unanalyzed_exercises = db.get_exercises_by_course(course_code, unanalyzed_only=True)
+
+            # Display progress summary
+            total_count = len(all_exercises)
+            analyzed_count = len(analyzed_exercises)
+            remaining_count = len(unanalyzed_exercises)
+
+            console.print(f"Found {total_count} exercise fragments")
+            console.print(f"  [green]Already analyzed: {analyzed_count}[/green]")
+            console.print(f"  [yellow]Remaining: {remaining_count}[/yellow]\n")
+
+            # Determine which exercises to analyze
+            if force:
+                console.print("[yellow]--force flag: Re-analyzing all exercises[/yellow]\n")
+                exercises = all_exercises
+                # Reset analyzed flag for all exercises
+                db.conn.execute("UPDATE exercises SET analyzed = 0 WHERE course_code = ?", (course_code,))
+                db.conn.commit()
+            elif remaining_count == 0:
+                console.print("[green]All exercises already analyzed! Use --force to re-analyze.[/green]\n")
+                return
+            else:
+                if analyzed_count > 0:
+                    console.print(f"[cyan]Resuming analysis from checkpoint ({remaining_count} exercises remaining)...[/cyan]\n")
+                exercises = all_exercises  # Need all for proper merging context
 
         # Initialize components
         console.print(f"🤖 Initializing AI components (provider: {provider}, language: {lang})...")
@@ -382,12 +412,30 @@ def analyze(course, limit, provider, lang):
             console.print(f"[dim]Limited to {limit} exercises for testing[/dim]\n")
 
         # Analyze and merge
-        console.print("🔍 Analyzing and merging exercise fragments...")
+        processing_mode = "parallel" if parallel else "sequential"
+        console.print(f"🔍 Analyzing and merging exercise fragments ({processing_mode} mode)...")
+        if parallel:
+            batch_size_msg = batch_size if batch_size else Config.BATCH_SIZE
+            console.print(f"[dim]Using batch size: {batch_size_msg}[/dim]")
         console.print("[dim]This may take a while...[/dim]\n")
 
-        discovery_result = analyzer.discover_topics_and_core_loops(course_code)
+        # Determine if we should skip analyzed exercises
+        skip_analyzed = not force and analyzed_count > 0
 
-        console.print(f"✓ Merged {discovery_result['original_count']} fragments → {discovery_result['merged_count']} exercises\n")
+        discovery_result = analyzer.discover_topics_and_core_loops(
+            course_code,
+            batch_size=batch_size or Config.BATCH_SIZE,
+            skip_analyzed=skip_analyzed,
+            use_parallel=parallel
+        )
+
+        # Show progress summary
+        if skip_analyzed:
+            newly_analyzed = discovery_result['merged_count']
+            console.print(f"✓ Analyzed {newly_analyzed} new exercises (skipped {analyzed_count} already analyzed)")
+            console.print(f"  Total progress: {analyzed_count + newly_analyzed}/{total_count} exercises\n")
+        else:
+            console.print(f"✓ Merged {discovery_result['original_count']} fragments → {discovery_result['merged_count']} exercises\n")
 
         # Display results
         topics = discovery_result['topics']
@@ -442,6 +490,18 @@ def analyze(course, limit, provider, lang):
 
             # Update exercises with analysis
             for merged_ex in discovery_result['merged_exercises']:
+                # Update first exercise in merged group
+                first_id = merged_ex['merged_from'][0]
+
+                # Check if this exercise was skipped due to low confidence
+                if merged_ex.get('low_confidence_skipped'):
+                    db.conn.execute("""
+                        UPDATE exercises
+                        SET analyzed = 1, low_confidence_skipped = 1
+                        WHERE id = ?
+                    """, (first_id,))
+                    continue
+
                 analysis = merged_ex.get('analysis')
                 if analysis and analysis.topic:
                     # Map topic name to canonical name (if deduplicated)
@@ -463,8 +523,6 @@ def analyze(course, limit, provider, lang):
                         print(f"[DEBUG] Skipping exercise {first_id[:20]}... - core_loop_id '{canonical_core_loop_id}' not found in deduplicated core_loops")
                         canonical_core_loop_id = None
 
-                    # Update first exercise in merged group
-                    first_id = merged_ex['merged_from'][0]
                     db.conn.execute("""
                         UPDATE exercises
                         SET topic_id = ?, core_loop_id = ?, difficulty = ?, analyzed = 1
@@ -492,6 +550,18 @@ def analyze(course, limit, provider, lang):
         stats = vector_store.get_collection_stats(course_code)
         console.print(f"   ✓ {stats.get('exercises_count', 0)} exercise embeddings")
         console.print(f"   ✓ {stats.get('procedures_count', 0)} procedure embeddings\n")
+
+        # Show cache statistics
+        cache_stats = llm.get_cache_stats()
+        if cache_stats['total_requests'] > 0:
+            console.print("📊 Cache Statistics:")
+            console.print(f"   Cache hits: {cache_stats['cache_hits']}")
+            console.print(f"   Cache misses: {cache_stats['cache_misses']}")
+            console.print(f"   Hit rate: {cache_stats['hit_rate_percent']}%")
+            if cache_stats['cache_hits'] > 0:
+                console.print(f"   [green]💰 Saved ~{cache_stats['cache_hits']} API calls![/green]\n")
+            else:
+                console.print(f"   [dim]Run analyze again to see cache benefits[/dim]\n")
 
         # Summary
         console.print("[bold green]✨ Analysis complete![/bold green]\n")

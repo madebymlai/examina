@@ -5,6 +5,9 @@ Handles interactions with Ollama and other LLM providers.
 
 import json
 import requests
+import hashlib
+import time
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 
@@ -47,6 +50,136 @@ class LLMManager:
             self.primary_model = Config.LLM_PRIMARY_MODEL  # Heavy reasoning
             self.fast_model = Config.LLM_FAST_MODEL  # Quick tasks
             self.embed_model = Config.LLM_EMBED_MODEL  # Embeddings
+
+        # Cache settings
+        self.cache_enabled = Config.CACHE_ENABLED
+        self.cache_ttl = Config.CACHE_TTL
+        self.cache_dir = Config.CACHE_PATH / "llm"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Cache statistics
+        self.cache_hits = 0
+        self.cache_misses = 0
+
+    def _generate_cache_key(self, provider: str, model: str, prompt: str,
+                           system: Optional[str], temperature: float,
+                           json_mode: bool) -> str:
+        """Generate cache key from request parameters.
+
+        Args:
+            provider: LLM provider name
+            model: Model name
+            prompt: User prompt
+            system: System prompt
+            temperature: Sampling temperature
+            json_mode: Whether JSON mode is enabled
+
+        Returns:
+            SHA256 hash as cache key
+        """
+        # Create deterministic string from all parameters that affect output
+        cache_string = json.dumps({
+            "provider": provider,
+            "model": model,
+            "prompt": prompt,
+            "system": system or "",
+            "temperature": temperature,
+            "json_mode": json_mode
+        }, sort_keys=True)
+
+        # Generate hash
+        return hashlib.sha256(cache_string.encode()).hexdigest()
+
+    def _get_cached_response(self, cache_key: str) -> Optional[LLMResponse]:
+        """Retrieve cached response if available and not expired.
+
+        Args:
+            cache_key: Cache key
+
+        Returns:
+            Cached LLMResponse or None if not found/expired
+        """
+        if not self.cache_enabled:
+            return None
+
+        cache_file = self.cache_dir / f"{cache_key}.json"
+
+        if not cache_file.exists():
+            return None
+
+        try:
+            with open(cache_file, 'r') as f:
+                cache_data = json.load(f)
+
+            # Check TTL
+            cached_time = cache_data.get("timestamp", 0)
+            if time.time() - cached_time > self.cache_ttl:
+                # Cache expired
+                cache_file.unlink()  # Delete expired cache
+                return None
+
+            # Cache hit!
+            self.cache_hits += 1
+            print(f"  [CACHE HIT] Using cached response")
+
+            return LLMResponse(
+                text=cache_data.get("text", ""),
+                model=cache_data.get("model", ""),
+                success=cache_data.get("success", False),
+                error=cache_data.get("error"),
+                metadata=cache_data.get("metadata")
+            )
+
+        except Exception as e:
+            print(f"  [CACHE ERROR] Failed to read cache: {e}")
+            return None
+
+    def _save_to_cache(self, cache_key: str, response: LLMResponse):
+        """Save response to cache.
+
+        Args:
+            cache_key: Cache key
+            response: LLM response to cache
+        """
+        if not self.cache_enabled:
+            return
+
+        cache_file = self.cache_dir / f"{cache_key}.json"
+
+        try:
+            cache_data = {
+                "timestamp": time.time(),
+                "text": response.text,
+                "model": response.model,
+                "success": response.success,
+                "error": response.error,
+                "metadata": response.metadata
+            }
+
+            with open(cache_file, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+
+            print(f"  [CACHE MISS] Response cached for future use")
+            self.cache_misses += 1
+
+        except Exception as e:
+            print(f"  [CACHE ERROR] Failed to save cache: {e}")
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics.
+
+        Returns:
+            Dict with cache hits, misses, and hit rate
+        """
+        total = self.cache_hits + self.cache_misses
+        hit_rate = (self.cache_hits / total * 100) if total > 0 else 0
+
+        return {
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "total_requests": total,
+            "hit_rate_percent": round(hit_rate, 2)
+        }
 
     def generate(self, prompt: str, model: Optional[str] = None,
                  system: Optional[str] = None,
@@ -190,6 +323,20 @@ class LLMManager:
                 error="GROQ_API_KEY not set. Get one at https://console.groq.com"
             )
 
+        # Check cache first
+        cache_key = self._generate_cache_key(
+            provider="groq",
+            model=model,
+            prompt=prompt,
+            system=system,
+            temperature=temperature,
+            json_mode=json_mode
+        )
+
+        cached_response = self._get_cached_response(cache_key)
+        if cached_response:
+            return cached_response
+
         max_retries = 3
         base_delay = 2  # seconds
 
@@ -225,7 +372,7 @@ class LLMManager:
                 result = response.json()
                 text = result["choices"][0]["message"]["content"]
 
-                return LLMResponse(
+                llm_response = LLMResponse(
                     text=text,
                     model=model,
                     success=True,
@@ -234,6 +381,11 @@ class LLMManager:
                         "finish_reason": result["choices"][0].get("finish_reason"),
                     }
                 )
+
+                # Cache successful response
+                self._save_to_cache(cache_key, llm_response)
+
+                return llm_response
 
             except requests.exceptions.HTTPError as e:
                 error_msg = f"Groq API error: {e}"
@@ -307,6 +459,20 @@ class LLMManager:
                 error="ANTHROPIC_API_KEY not set. Get one at https://console.anthropic.com"
             )
 
+        # Check cache first
+        cache_key = self._generate_cache_key(
+            provider="anthropic",
+            model=model,
+            prompt=prompt,
+            system=system,
+            temperature=temperature,
+            json_mode=json_mode
+        )
+
+        cached_response = self._get_cached_response(cache_key)
+        if cached_response:
+            return cached_response
+
         max_retries = 3
         base_delay = 2  # seconds
 
@@ -340,7 +506,7 @@ class LLMManager:
                 result = response.json()
                 text = result["content"][0]["text"]
 
-                return LLMResponse(
+                llm_response = LLMResponse(
                     text=text,
                     model=model,
                     success=True,
@@ -349,6 +515,11 @@ class LLMManager:
                         "stop_reason": result.get("stop_reason"),
                     }
                 )
+
+                # Cache successful response
+                self._save_to_cache(cache_key, llm_response)
+
+                return llm_response
 
             except requests.exceptions.HTTPError as e:
                 error_msg = f"Anthropic API error: {e}"

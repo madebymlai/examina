@@ -5,9 +5,11 @@ Handles exercise merging, topic discovery, and core loop identification.
 
 import json
 import re
+import time
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from models.llm_manager import LLMManager, LLMResponse
 from storage.database import Database
@@ -206,11 +208,12 @@ Respond ONLY with valid JSON, no other text.
             confidence=0.0
         )
 
-    def merge_exercises(self, exercises: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def merge_exercises(self, exercises: List[Dict[str, Any]], skip_analyzed: bool = False) -> List[Dict[str, Any]]:
         """Merge exercise fragments into complete exercises.
 
         Args:
             exercises: List of exercise dicts from database
+            skip_analyzed: If True, skip exercises already marked as analyzed
 
         Returns:
             List of merged exercises
@@ -222,6 +225,15 @@ Respond ONLY with valid JSON, no other text.
         current_merge = None
 
         for i, exercise in enumerate(exercises):
+            # Skip already analyzed exercises if requested
+            if skip_analyzed and exercise.get('analyzed'):
+                # If we have a current merge, save it before skipping
+                if current_merge:
+                    merged.append(current_merge)
+                    current_merge = None
+                print(f"[DEBUG] Skipping already analyzed exercise: {exercise['id'][:40]}...")
+                continue
+
             # Analyze exercise
             previous_text = current_merge["text"] if current_merge else None
             if i > 0 and not current_merge:
@@ -265,13 +277,207 @@ Respond ONLY with valid JSON, no other text.
 
         return merged
 
+    def _analyze_exercise_with_retry(self, exercise_text: str, course_name: str,
+                                     previous_exercise: Optional[str] = None,
+                                     max_retries: int = 2) -> AnalysisResult:
+        """Analyze exercise with retry logic for failed API calls.
+
+        Args:
+            exercise_text: Exercise text
+            course_name: Course name for context
+            previous_exercise: Previous exercise text (for merge detection)
+            max_retries: Maximum number of retries on failure
+
+        Returns:
+            AnalysisResult with classification
+        """
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                result = self.analyze_exercise(exercise_text, course_name, previous_exercise)
+                # Check if analysis was successful
+                if result.confidence > 0.0 or result.topic is not None:
+                    return result
+                # If we got default result, retry
+                if attempt < max_retries:
+                    print(f"  Retry {attempt + 1}/{max_retries} for exercise...")
+                    time.sleep(1 * (attempt + 1))  # Exponential backoff
+                    continue
+                return result
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    print(f"  Error on attempt {attempt + 1}: {str(e)}, retrying...")
+                    time.sleep(1 * (attempt + 1))
+                    continue
+
+        # All retries failed, return default
+        print(f"  All retries failed: {last_error}")
+        return self._default_analysis_result()
+
+    def merge_exercises_parallel(self, exercises: List[Dict[str, Any]],
+                                 batch_size: Optional[int] = None,
+                                 show_progress: bool = True,
+                                 skip_analyzed: bool = False) -> List[Dict[str, Any]]:
+        """Merge exercise fragments using parallel batch processing.
+
+        This method analyzes exercises in parallel batches to improve performance.
+        Each batch is processed concurrently, with retry logic for failed exercises.
+
+        Args:
+            exercises: List of exercise dicts from database
+            batch_size: Number of exercises to process in parallel (defaults to Config.BATCH_SIZE)
+            show_progress: Show progress bar during processing
+            skip_analyzed: If True, skip exercises already marked as analyzed
+
+        Returns:
+            List of merged exercises
+        """
+        if not exercises:
+            return []
+
+        batch_size = batch_size or Config.BATCH_SIZE
+        total = len(exercises)
+
+        print(f"[INFO] Starting parallel batch analysis of {total} exercises (batch_size={batch_size})...")
+        start_time = time.time()
+
+        # Store analysis results indexed by exercise position
+        analysis_results = {}
+
+        # Process in batches
+        def analyze_single(index: int, exercise: Dict[str, Any], prev_text: Optional[str]) -> tuple:
+            """Analyze a single exercise and return (index, analysis, error)."""
+            try:
+                # Skip already analyzed if requested
+                if skip_analyzed and exercise.get('analyzed'):
+                    return (index, None, None)  # Signal to skip
+
+                analysis = self._analyze_exercise_with_retry(
+                    exercise["text"],
+                    "Computer Architecture",  # TODO: get from exercise
+                    prev_text
+                )
+                return (index, analysis, None)
+            except Exception as e:
+                print(f"  [ERROR] Failed to analyze exercise {index}: {str(e)}")
+                return (index, self._default_analysis_result(), str(e))
+
+        # Process exercises in batches with ThreadPoolExecutor
+        processed = 0
+        failed_count = 0
+        skipped_count = 0
+
+        for batch_start in range(0, total, batch_size):
+            batch_end = min(batch_start + batch_size, total)
+            batch = exercises[batch_start:batch_end]
+            batch_indices = list(range(batch_start, batch_end))
+
+            if show_progress:
+                print(f"  Processing batch {batch_start//batch_size + 1}/{(total + batch_size - 1)//batch_size} (exercises {batch_start+1}-{batch_end}/{total})...")
+
+            # Prepare analysis tasks for this batch
+            with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                futures = {}
+
+                for i, (idx, exercise) in enumerate(zip(batch_indices, batch)):
+                    # Determine previous exercise text for merge detection
+                    prev_text = None
+                    if idx > 0:
+                        prev_text = exercises[idx - 1].get("text")
+
+                    future = executor.submit(analyze_single, idx, exercise, prev_text)
+                    futures[future] = idx
+
+                # Collect results as they complete
+                for future in as_completed(futures):
+                    idx, analysis, error = future.result()
+
+                    if analysis is None:  # Skipped exercise
+                        skipped_count += 1
+                    else:
+                        analysis_results[idx] = analysis
+
+                    processed += 1
+
+                    if error:
+                        failed_count += 1
+
+                    if show_progress and processed % 5 == 0:
+                        elapsed = time.time() - start_time
+                        rate = processed / elapsed if elapsed > 0 else 0
+                        eta = (total - processed) / rate if rate > 0 else 0
+                        print(f"    Progress: {processed}/{total} ({100*processed/total:.1f}%) | {rate:.1f} ex/s | ETA: {eta:.0f}s")
+
+        elapsed_time = time.time() - start_time
+
+        print(f"[INFO] Batch analysis complete in {elapsed_time:.1f}s")
+        print(f"  Processed: {processed}/{total} exercises")
+        if skipped_count > 0:
+            print(f"  Skipped (already analyzed): {skipped_count} exercises")
+        print(f"  Failed: {failed_count} exercises")
+        print(f"  Rate: {processed/elapsed_time:.1f} exercises/second")
+
+        # Now merge exercises sequentially based on analysis results
+        print(f"[INFO] Merging exercise fragments...")
+        merged = []
+        current_merge = None
+
+        for i, exercise in enumerate(exercises):
+            # Check if skipped
+            if i not in analysis_results:
+                if current_merge:
+                    merged.append(current_merge)
+                    current_merge = None
+                continue
+
+            analysis = analysis_results[i]
+
+            # Skip invalid exercises
+            if not analysis.is_valid_exercise:
+                print(f"[DEBUG] Skipping invalid exercise: {exercise['id'][:20]}... ({exercise['text'][:60]}...)")
+                continue
+
+            # Should merge with previous?
+            if analysis.should_merge_with_previous and current_merge:
+                # Merge into current
+                current_merge["text"] += "\n\n" + exercise["text"]
+                current_merge["merged_from"].append(exercise["id"])
+                if exercise.get("image_paths"):
+                    if not current_merge.get("image_paths"):
+                        current_merge["image_paths"] = []
+                    current_merge["image_paths"].extend(exercise["image_paths"])
+            else:
+                # Save previous merge if exists
+                if current_merge:
+                    merged.append(current_merge)
+
+                # Start new exercise
+                current_merge = {
+                    **exercise,
+                    "merged_from": [exercise["id"]],
+                    "analysis": analysis
+                }
+
+        # Don't forget last one
+        if current_merge:
+            merged.append(current_merge)
+
+        print(f"[INFO] Merged {len(exercises)} fragments → {len(merged)} complete exercises")
+
+        return merged
+
     def discover_topics_and_core_loops(self, course_code: str,
-                                      batch_size: int = 10) -> Dict[str, Any]:
+                                      batch_size: int = 10,
+                                      skip_analyzed: bool = False,
+                                      use_parallel: bool = True) -> Dict[str, Any]:
         """Discover topics and core loops for a course.
 
         Args:
             course_code: Course code
             batch_size: Number of exercises to analyze at once
+            skip_analyzed: If True, skip already analyzed exercises
+            use_parallel: If True, use parallel batch processing (default: True)
 
         Returns:
             Dict with topics and core loops discovered
@@ -283,16 +489,32 @@ Respond ONLY with valid JSON, no other text.
             if not exercises:
                 return {"topics": {}, "core_loops": {}}
 
-            # Merge fragments first
-            merged_exercises = self.merge_exercises(exercises)
+            # Merge fragments first - use parallel or sequential mode
+            if use_parallel:
+                merged_exercises = self.merge_exercises_parallel(
+                    exercises,
+                    batch_size=batch_size,
+                    skip_analyzed=skip_analyzed
+                )
+            else:
+                merged_exercises = self.merge_exercises(exercises, skip_analyzed=skip_analyzed)
 
             # Collect all analyses
             topics = {}
             core_loops = {}
+            low_confidence_count = 0
 
             for merged_ex in merged_exercises:
                 analysis = merged_ex.get("analysis")
                 if not analysis:
+                    continue
+
+                # Skip low-confidence analyses
+                if analysis.confidence < Config.MIN_ANALYSIS_CONFIDENCE:
+                    low_confidence_count += 1
+                    print(f"[INFO] Skipping exercise due to low confidence ({analysis.confidence:.2f} < {Config.MIN_ANALYSIS_CONFIDENCE}): {merged_ex['id'][:40]}...")
+                    # Mark exercise as skipped in metadata
+                    merged_ex["low_confidence_skipped"] = True
                     continue
 
                 # Track topic
@@ -331,12 +553,23 @@ Respond ONLY with valid JSON, no other text.
             topics = self._deduplicate_topics(topics)
             core_loops = self._deduplicate_core_loops(core_loops)
 
+            # Log summary statistics
+            accepted_count = len(merged_exercises) - low_confidence_count
+            if low_confidence_count > 0:
+                print(f"\n[SUMMARY] Confidence Filtering Results:")
+                print(f"  Total merged exercises: {len(merged_exercises)}")
+                print(f"  Accepted (>= {Config.MIN_ANALYSIS_CONFIDENCE} confidence): {accepted_count}")
+                print(f"  Skipped (low confidence): {low_confidence_count}")
+                print(f"  Skip rate: {(low_confidence_count / len(merged_exercises) * 100):.1f}%\n")
+
             return {
                 "topics": topics,
                 "core_loops": core_loops,
                 "merged_exercises": merged_exercises,
                 "original_count": len(exercises),
-                "merged_count": len(merged_exercises)
+                "merged_count": len(merged_exercises),
+                "low_confidence_skipped": low_confidence_count,
+                "accepted_count": accepted_count
             }
 
     def _similarity(self, str1: str, str2: str) -> float:

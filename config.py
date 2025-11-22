@@ -54,6 +54,7 @@ class Config:
     # Analysis Settings
     MIN_EXERCISES_FOR_CORE_LOOP = 2  # Minimum exercises to establish a core loop
     CORE_LOOP_SIMILARITY_THRESHOLD = 0.85  # Similarity threshold for merging core loops
+    MIN_ANALYSIS_CONFIDENCE = float(os.getenv("EXAMINA_MIN_CONFIDENCE", "0.5"))  # Minimum confidence for analysis results
 
     # Supported languages
     SUPPORTED_LANGUAGES = ["it", "en"]  # Italian and English

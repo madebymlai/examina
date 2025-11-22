@@ -58,7 +58,22 @@ class Database:
 
         self._create_tables()
         self._create_indexes()
+        self._run_migrations()
         self.conn.commit()
+
+    def _run_migrations(self):
+        """Run database migrations for schema updates."""
+        # Check if low_confidence_skipped column exists in exercises table
+        cursor = self.conn.execute("PRAGMA table_info(exercises)")
+        columns = [row[1] for row in cursor.fetchall()]
+
+        if 'low_confidence_skipped' not in columns:
+            print("[INFO] Running migration: Adding low_confidence_skipped column to exercises table")
+            self.conn.execute("""
+                ALTER TABLE exercises
+                ADD COLUMN low_confidence_skipped BOOLEAN DEFAULT 0
+            """)
+            print("[INFO] Migration completed successfully")
 
     def _create_tables(self):
         """Create all database tables."""
@@ -124,6 +139,7 @@ class Database:
                 solution TEXT,
                 analyzed BOOLEAN DEFAULT 0,
                 analysis_metadata TEXT,
+                low_confidence_skipped BOOLEAN DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (course_code) REFERENCES courses(code),
                 FOREIGN KEY (topic_id) REFERENCES topics(id),
@@ -434,13 +450,31 @@ class Database:
             results.append(result)
         return results
 
-    def get_exercises_by_course(self, course_code: str) -> List[Dict[str, Any]]:
-        """Get all exercises for a course."""
-        cursor = self.conn.execute("""
+    def get_exercises_by_course(self, course_code: str, analyzed_only: bool = False,
+                                 unanalyzed_only: bool = False) -> List[Dict[str, Any]]:
+        """Get all exercises for a course.
+
+        Args:
+            course_code: Course code to filter by
+            analyzed_only: If True, return only analyzed exercises
+            unanalyzed_only: If True, return only unanalyzed exercises
+
+        Returns:
+            List of exercise dictionaries
+        """
+        query = """
             SELECT * FROM exercises
             WHERE course_code = ?
-            ORDER BY created_at
-        """, (course_code,))
+        """
+
+        if analyzed_only:
+            query += " AND analyzed = 1"
+        elif unanalyzed_only:
+            query += " AND analyzed = 0"
+
+        query += " ORDER BY created_at"
+
+        cursor = self.conn.execute(query, (course_code,))
 
         results = []
         for row in cursor.fetchall():
