@@ -47,6 +47,21 @@ Examina analyzes past exam PDFs to:
 - Analytics dashboard with topic breakdown
 - Multi-language support (Italian/English)
 
+**Phase 6: Multi-Core-Loop Support** 🚧 IN PROGRESS
+- Extract ALL procedures from multi-step exercises (design + transformation + minimization)
+- Many-to-many exercise-to-core-loop relationships
+- Intelligent detection of numbered points and transformations
+- Tag-based search (e.g., find all "Mealy→Moore" exercises)
+- Backward compatible with existing analyses
+
+**Phase 7: Enhanced Learning System** 🚧 IN PROGRESS
+- ✅ **Deep theory explanations** - Prerequisite concepts with examples and analogies
+- ✅ **Step-by-step reasoning** - WHY behind each algorithm step
+- **NEW**: 3 depth levels (basic, medium, advanced)
+- **NEW**: --no-concepts flag to skip prerequisites
+- 🔜 Metacognitive learning strategies (study tips and frameworks)
+- 🔜 Adaptive teaching based on mastery level
+
 ## Installation
 
 ### Prerequisites
@@ -137,18 +152,31 @@ python3 cli.py analyze --course ADE --force
 - **Parallel Processing**: 7-8x faster (20s → 3s for 27 exercises)
 - **Caching**: Zero cost on re-runs (100% cache hit rate)
 - **Resume**: Automatic checkpoint recovery
-- **Deduplication**: Merges similar topics/core loops (0.85 similarity)
+- **Database-Aware Deduplication**: Prevents duplicates across analysis runs (0.85 similarity threshold)
 - **Confidence Filtering**: Filters low-quality analyses (default 0.5)
 
-### 3. Learn with AI Tutor
+### 3. Learn with AI Tutor (Enhanced with Deep Explanations)
 
 ```bash
-# Get comprehensive explanation of a core loop
+# Enhanced learning with prerequisite concepts (default)
 python3 cli.py learn --course ADE --loop moore_machine_design --lang en
 
-# Italian language
-python3 cli.py learn --course AL --loop analisi_completa_di_matrice_parametrica --lang it
+# Control explanation depth
+python3 cli.py learn --course ADE --loop conversione_mealy_moore --depth basic --lang en    # Concise
+python3 cli.py learn --course ADE --loop minimizzazione --depth advanced --lang en           # Comprehensive
+
+# Skip prerequisites for faster response
+python3 cli.py learn --course ADE --loop moore_machine_design --no-concepts --lang en
+
+# Italian language with custom depth
+python3 cli.py learn --course AL --loop gauss_elimination --depth medium --lang it
 ```
+
+**New Features:**
+- **Prerequisite Concepts**: Foundational explanations with examples and analogies
+- **WHY Reasoning**: Deep explanations of why each step works
+- **5-Section Structure**: Big Picture → Step-by-Step → Pitfalls → Decision-Making → Practice Strategy
+- **Depth Control**: basic (quick), medium (balanced), advanced (comprehensive)
 
 ### 4. Practice Exercises
 
@@ -166,6 +194,26 @@ python3 cli.py practice --course PC --topic "Sincronizzazione" --lang it
 # Generate exercise variations
 python3 cli.py generate --course ADE --loop moore_machine_design --difficulty hard --lang en
 ```
+
+### 6. Deduplicate Topics and Core Loops
+
+```bash
+# Preview what would be merged (dry run)
+python3 cli.py deduplicate --course ADE --dry-run
+
+# Merge duplicate topics and core loops
+python3 cli.py deduplicate --course ADE
+
+# Custom similarity threshold (default: 0.85)
+python3 cli.py deduplicate --course ADE --threshold 0.90
+```
+
+**Deduplication Features:**
+- Merges similar topics/core loops using string similarity
+- Updates all foreign key references automatically
+- Dry-run mode to preview changes before applying
+- Configurable similarity threshold (0.0-1.0)
+- Prevents data loss by preserving all exercise associations
 
 ## Usage Examples
 
@@ -296,6 +344,41 @@ export EXAMINA_CACHE_TTL=3600  # seconds
 ✅ Linear Algebra (AL) - 38 exercises, 2 topics, 4 core loops
 ✅ Concurrent Programming (PC) - 26 exercises, 6 topics, 14 core loops
 
+## Advanced Features (Phase 6)
+
+### Multi-Procedure Extraction
+
+Examina now extracts **ALL procedures** from multi-step exercises:
+
+**Example:**
+```
+Exercise: "1. Design Mealy machine, 2. Transform to Moore, 3. Minimize"
+
+Old behavior: Extracts only "Mealy Machine Design" ❌
+New behavior: Extracts all 3 procedures ✅
+  - Mealy Machine Design (step 1)
+  - Mealy to Moore Transformation (step 2)
+  - State Minimization (step 3)
+```
+
+**Features:**
+- **Intelligent Detection**: Recognizes numbered points, transformations, conversions
+- **Tag System**: Search exercises by procedure type (e.g., all "transformation" exercises)
+- **Many-to-Many**: Exercises can be linked to multiple core loops
+- **Backward Compatible**: Existing analyses continue to work
+
+**Supported Patterns:**
+- Numeric: "1.", "2.", "3."
+- Letters: "a)", "b)", "c)"
+- Italian: "Punto 1", "Esercizio 2.a"
+- Roman: "I.", "II.", "III."
+
+**Transformation Detection:**
+- Mealy ↔ Moore conversions
+- DFA ↔ NFA conversions
+- Logic form transformations (SOP, POS, etc.)
+- 15+ keyword patterns in English and Italian
+
 ## Contributing
 
 This is currently a personal learning project. Contributions and suggestions are welcome!
@@ -310,4 +393,10 @@ Built with Claude Code for studying at Università degli Studi di Firenze (UNIFI
 
 ---
 
-**Next Phase**: Quiz System with spaced repetition (SM-2), progress tracking, and mastery analytics.
+**Current Work**:
+- Phase 6: Multi-Core-Loop Support ✅ COMPLETE (extracting ALL procedures from multi-step exercises)
+- Phase 7: Enhanced Learning System 🚧 IN PROGRESS
+  - ✅ Phase 7.1: Deep theory explanations with prerequisite concepts
+  - ✅ Phase 7.2: Step-by-step WHY reasoning (partially complete)
+  - 🔜 Phase 7.3: Metacognitive learning strategies
+  - 🔜 Phase 7.4: Adaptive teaching based on mastery

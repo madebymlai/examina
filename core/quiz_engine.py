@@ -71,7 +71,9 @@ class QuizEngine:
         topic: Optional[str] = None,
         core_loop: Optional[str] = None,
         difficulty: Optional[str] = None,
-        review_only: bool = False
+        review_only: bool = False,
+        procedure_type: Optional[str] = None,
+        tags: Optional[str] = None
     ) -> QuizSession:
         """Create a new quiz session.
 
@@ -79,9 +81,11 @@ class QuizEngine:
             course_code: Course code
             num_questions: Number of questions
             topic: Optional topic filter
-            core_loop: Optional core loop filter
+            core_loop: Optional core loop filter (ID or name pattern)
             difficulty: Optional difficulty filter
             review_only: If True, only include exercises due for review
+            procedure_type: Optional procedure type (transformation, design, etc.)
+            tags: Optional tag filter (comma-separated)
 
         Returns:
             QuizSession object
@@ -91,6 +95,8 @@ class QuizEngine:
         # Determine quiz type
         if review_only:
             quiz_type = 'review'
+        elif procedure_type:
+            quiz_type = 'procedure'
         elif core_loop:
             quiz_type = 'core_loop'
         elif topic:
@@ -105,7 +111,9 @@ class QuizEngine:
             topic=topic,
             core_loop=core_loop,
             difficulty=difficulty,
-            review_only=review_only
+            review_only=review_only,
+            procedure_type=procedure_type,
+            tags=tags
         )
 
         if not exercises:
@@ -158,7 +166,9 @@ class QuizEngine:
         topic: Optional[str],
         core_loop: Optional[str],
         difficulty: Optional[str],
-        review_only: bool
+        review_only: bool,
+        procedure_type: Optional[str] = None,
+        tags: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Select exercises for the quiz.
 
@@ -166,33 +176,36 @@ class QuizEngine:
             course_code: Course code
             num_questions: Number of questions needed
             topic: Optional topic filter
-            core_loop: Optional core loop filter
+            core_loop: Optional core loop filter (ID or name pattern)
             difficulty: Optional difficulty filter
             review_only: Only exercises due for review
+            procedure_type: Optional procedure type filter (transformation, design, etc.)
+            tags: Optional tag filter (comma-separated)
 
         Returns:
             List of exercise dictionaries
         """
         with Database() as db:
-            # Build query
+            # Build query using junction table for multi-procedure support
             query = """
-                SELECT
+                SELECT DISTINCT
                     e.id,
                     e.text,
                     e.difficulty,
                     e.core_loop_id,
-                    cl.name as core_loop_name,
+                    e.tags,
                     t.name as topic_name,
                     sp.next_review,
-                    sp.mastery_score
+                    sp.mastery_score,
+                    GROUP_CONCAT(DISTINCT cl.name) as core_loop_names
                 FROM exercises e
-                LEFT JOIN core_loops cl ON e.core_loop_id = cl.id
                 LEFT JOIN topics t ON e.topic_id = t.id
+                LEFT JOIN exercise_core_loops ecl ON e.id = ecl.exercise_id
+                LEFT JOIN core_loops cl ON ecl.core_loop_id = cl.id
                 LEFT JOIN student_progress sp ON e.core_loop_id = sp.core_loop_id AND sp.course_code = ?
                 WHERE e.course_code = ?
                     AND e.analyzed = 1
                     AND e.low_confidence_skipped = 0
-                    AND e.core_loop_id IS NOT NULL
             """
             params = [course_code, course_code]
 
@@ -202,15 +215,37 @@ class QuizEngine:
                 params.append(f"%{topic}%")
 
             if core_loop:
-                query += " AND e.core_loop_id = ?"
+                # Support both ID and name pattern matching via junction table
+                query += """ AND e.id IN (
+                    SELECT exercise_id FROM exercise_core_loops ecl2
+                    JOIN core_loops cl2 ON ecl2.core_loop_id = cl2.id
+                    WHERE cl2.id = ? OR cl2.name LIKE ?
+                )"""
                 params.append(core_loop)
+                params.append(f"%{core_loop}%")
 
             if difficulty:
                 query += " AND e.difficulty = ?"
                 params.append(difficulty)
 
+            if procedure_type:
+                # Filter by procedure type using tags
+                query += " AND e.tags LIKE ?"
+                params.append(f'%"{procedure_type}"%')
+
+            if tags:
+                # Filter by any of the provided tags (comma-separated)
+                tag_list = [t.strip() for t in tags.split(',')]
+                tag_conditions = " OR ".join(["e.tags LIKE ?" for _ in tag_list])
+                query += f" AND ({tag_conditions})"
+                for tag in tag_list:
+                    params.append(f'%"{tag}"%')
+
             if review_only:
                 query += " AND sp.next_review IS NOT NULL AND DATE(sp.next_review) <= DATE('now')"
+
+            # Group by exercise to aggregate core loop names
+            query += " GROUP BY e.id"
 
             # Execute query
             results = db.conn.execute(query, params).fetchall()

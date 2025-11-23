@@ -15,6 +15,25 @@ from models.llm_manager import LLMManager, LLMResponse
 from storage.database import Database
 from config import Config
 
+# Try to import semantic matcher, fallback to string similarity if not available
+try:
+    from core.semantic_matcher import SemanticMatcher
+    SEMANTIC_MATCHING_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARNING] SemanticMatcher not available: {e}")
+    print("  Falling back to string-based similarity matching")
+    SEMANTIC_MATCHING_AVAILABLE = False
+
+
+@dataclass
+class ProcedureInfo:
+    """Information about a single procedure/algorithm in an exercise."""
+    name: str
+    type: str  # design, transformation, verification, minimization, analysis, other
+    steps: List[str]
+    point_number: Optional[int] = None
+    transformation: Optional[Dict[str, str]] = None  # {"source_format": "X", "target_format": "Y"}
+
 
 @dataclass
 class AnalysisResult:
@@ -23,12 +42,42 @@ class AnalysisResult:
     is_fragment: bool
     should_merge_with_previous: bool
     topic: Optional[str]
-    core_loop_id: Optional[str]
-    core_loop_name: Optional[str]
-    procedure: Optional[List[str]]
     difficulty: Optional[str]
     variations: Optional[List[str]]
     confidence: float
+    procedures: List[ProcedureInfo]  # NEW: Multiple procedures support
+
+    # Backward compatibility fields (derived from first procedure)
+    @property
+    def core_loop_id(self) -> Optional[str]:
+        """Primary core loop ID (first procedure)."""
+        if self.procedures:
+            return self._normalize_core_loop_id(self.procedures[0].name)
+        return None
+
+    @property
+    def core_loop_name(self) -> Optional[str]:
+        """Primary core loop name (first procedure)."""
+        if self.procedures:
+            return self.procedures[0].name
+        return None
+
+    @property
+    def procedure(self) -> Optional[List[str]]:
+        """Primary procedure steps (first procedure)."""
+        if self.procedures:
+            return self.procedures[0].steps
+        return None
+
+    @staticmethod
+    def _normalize_core_loop_id(core_loop_name: Optional[str]) -> Optional[str]:
+        """Normalize core loop name to ID."""
+        if not core_loop_name:
+            return None
+        core_loop_id = core_loop_name.lower()
+        core_loop_id = re.sub(r'[^\w\s-]', '', core_loop_id)
+        core_loop_id = re.sub(r'[\s-]+', '_', core_loop_id)
+        return core_loop_id
 
 
 class ExerciseAnalyzer:
@@ -43,6 +92,27 @@ class ExerciseAnalyzer:
         """
         self.llm = llm_manager or LLMManager()
         self.language = language
+
+        # Initialize semantic matcher if available
+        if SEMANTIC_MATCHING_AVAILABLE and Config.SEMANTIC_SIMILARITY_ENABLED:
+            try:
+                self.semantic_matcher = SemanticMatcher()
+                self.use_semantic = self.semantic_matcher.enabled
+                if self.use_semantic:
+                    print("[INFO] Semantic similarity matching enabled")
+                else:
+                    print("[INFO] Semantic matcher loaded but model unavailable, using string similarity")
+            except Exception as e:
+                print(f"[WARNING] Failed to initialize SemanticMatcher: {e}")
+                self.semantic_matcher = None
+                self.use_semantic = False
+        else:
+            self.semantic_matcher = None
+            self.use_semantic = False
+            if not SEMANTIC_MATCHING_AVAILABLE:
+                print("[INFO] Semantic matching not available, using string similarity")
+            else:
+                print("[INFO] Semantic matching disabled in config, using string similarity")
 
     def analyze_exercise(self, exercise_text: str, course_name: str,
                         previous_exercise: Optional[str] = None) -> AnalysisResult:
@@ -73,23 +143,34 @@ class ExerciseAnalyzer:
             # Log error and return default
             print(f"[ERROR] LLM failed for exercise: {response.error}")
             print(f"  Text preview: {exercise_text[:100]}...")
-            return AnalysisResult(
-                is_valid_exercise=True,  # Assume valid if we can't analyze
-                is_fragment=False,
-                should_merge_with_previous=False,
-                topic=None,
-                core_loop_id=None,
-                core_loop_name=None,
-                procedure=None,
-                difficulty=None,
-                variations=None,
-                confidence=0.0
-            )
+            return self._default_analysis_result()
 
         # Parse JSON response
         data = self.llm.parse_json_response(response)
         if not data:
             return self._default_analysis_result()
+
+        # Parse procedures (new format) or fallback to old format
+        procedures = []
+        if "procedures" in data and data["procedures"]:
+            # New format: multiple procedures
+            for proc_data in data["procedures"]:
+                procedures.append(ProcedureInfo(
+                    name=proc_data.get("name", "Unknown Procedure"),
+                    type=proc_data.get("type", "other"),
+                    steps=proc_data.get("steps", []),
+                    point_number=proc_data.get("point_number"),
+                    transformation=proc_data.get("transformation")
+                ))
+        elif "core_loop_name" in data and data["core_loop_name"]:
+            # Old format: single procedure - convert to new format
+            procedures.append(ProcedureInfo(
+                name=data["core_loop_name"],
+                type="other",  # Unknown type in old format
+                steps=data.get("procedure", []),
+                point_number=None,
+                transformation=None
+            ))
 
         # Extract fields
         return AnalysisResult(
@@ -97,12 +178,10 @@ class ExerciseAnalyzer:
             is_fragment=data.get("is_fragment", False),
             should_merge_with_previous=data.get("should_merge_with_previous", False),
             topic=data.get("topic"),
-            core_loop_id=self._normalize_core_loop_id(data.get("core_loop_name")),
-            core_loop_name=data.get("core_loop_name"),
-            procedure=data.get("procedure", []),
             difficulty=data.get("difficulty"),
             variations=data.get("variations", []),
-            confidence=data.get("confidence", 0.5)
+            confidence=data.get("confidence", 0.5),
+            procedures=procedures
         )
 
     def _build_analysis_prompt(self, exercise_text: str, course_name: str,
@@ -156,18 +235,39 @@ Respond in JSON format with:
   "is_fragment": true/false,  // true if incomplete or part of larger exercise
   "should_merge_with_previous": true/false,  // true if continuation of previous
   "topic": "topic name",  // e.g., "Sequential Circuits", "Boolean Algebra"
-  "core_loop_name": "procedure name",  // e.g., "Mealy Machine Design", "Karnaugh Maps"
-  "procedure": ["step 1", "step 2", ...],  // solving steps
   "difficulty": "easy|medium|hard",
   "variations": ["variation1", ...],  // specific variants used
-  "confidence": 0.0-1.0  // your confidence in this analysis
+  "confidence": 0.0-1.0,  // your confidence in this analysis
+  "procedures": [  // ALL distinct procedures/algorithms required (NEW: can be multiple!)
+    {{
+      "name": "procedure name",  // e.g., "Mealy Machine Design", "SOP to POS Conversion"
+      "type": "design|transformation|verification|minimization|analysis|other",
+      "steps": ["step 1", "step 2", ...],  // solving steps for this procedure
+      "point_number": 1,  // which numbered point (1, 2, 3, etc.) - null if not applicable
+      "transformation": {{  // ONLY if type=transformation
+        "source_format": "format name",  // e.g., "Mealy Machine", "SOP"
+        "target_format": "format name"   // e.g., "Moore Machine", "POS"
+      }}
+    }}
+  ]
 }}
 
-IMPORTANT:
+IMPORTANT ANALYSIS GUIDELINES:
 - If text contains only exam rules (like "NON si può usare la calcolatrice"), mark as NOT valid exercise
 - If text is clearly a sub-question (starts with "1.", "2.") right after numbered list, it's a fragment
-- Core loop is the ALGORITHM/PROCEDURE to solve, not just the topic
+- Core loop/procedure is the ALGORITHM/PROCEDURE to solve, not just the topic
+
+MULTI-PROCEDURE DETECTION:
+- If exercise has numbered points (1., 2., 3.), analyze EACH point separately
+- Each distinct procedure should have its own entry in "procedures" array
+- Set "point_number" to indicate which numbered point it belongs to
+- If exercise requires multiple procedures (e.g., "design AND verify"), list ALL of them
+- For transformations/conversions (Mealy→Moore, SOP→POS, etc.), set type="transformation" and fill "transformation" object
+
+BACKWARD COMPATIBILITY:
+- Even if exercise has only ONE procedure, still return it in "procedures" array
 - Extract actual solving steps if you can identify them
+- The first procedure in the array is considered the PRIMARY procedure
 
 Respond ONLY with valid JSON, no other text.
 """
@@ -200,12 +300,10 @@ Respond ONLY with valid JSON, no other text.
             is_fragment=False,
             should_merge_with_previous=False,
             topic=None,
-            core_loop_id=None,
-            core_loop_name=None,
-            procedure=None,
             difficulty=None,
             variations=None,
-            confidence=0.0
+            confidence=0.0,
+            procedures=[]  # Empty procedures list
         )
 
     def merge_exercises(self, exercises: List[Dict[str, Any]], skip_analyzed: bool = False) -> List[Dict[str, Any]]:
@@ -527,31 +625,46 @@ Respond ONLY with valid JSON, no other text.
                         }
                     topics[analysis.topic]["exercise_count"] += 1
 
-                    # Track core loop under topic
-                    if analysis.core_loop_id:
-                        topics[analysis.topic]["core_loops"].add(analysis.core_loop_id)
+                # Process ALL procedures (new multi-procedure support)
+                if analysis.procedures:
+                    # Log if multiple procedures detected
+                    if len(analysis.procedures) > 1:
+                        print(f"[INFO] Multiple procedures detected ({len(analysis.procedures)}) in exercise {merged_ex['id'][:40]}:")
+                        for i, proc in enumerate(analysis.procedures, 1):
+                            print(f"  {i}. {proc.name} (type: {proc.type}, point: {proc.point_number})")
 
-                # Track core loop
-                if analysis.core_loop_id and analysis.core_loop_name:
-                    if analysis.core_loop_id not in core_loops:
-                        core_loops[analysis.core_loop_id] = {
-                            "id": analysis.core_loop_id,
-                            "name": analysis.core_loop_name,
-                            "topic": analysis.topic,
-                            "procedure": analysis.procedure or [],
-                            "exercise_count": 0,
-                            "exercises": []
-                        }
-                    core_loops[analysis.core_loop_id]["exercise_count"] += 1
-                    core_loops[analysis.core_loop_id]["exercises"].append(merged_ex["id"])
+                    # Process each procedure
+                    for procedure_info in analysis.procedures:
+                        core_loop_id = self._normalize_core_loop_id(procedure_info.name)
+
+                        # Track core loop under topic
+                        if analysis.topic and core_loop_id:
+                            topics[analysis.topic]["core_loops"].add(core_loop_id)
+
+                        # Track core loop
+                        if core_loop_id and procedure_info.name:
+                            if core_loop_id not in core_loops:
+                                core_loops[core_loop_id] = {
+                                    "id": core_loop_id,
+                                    "name": procedure_info.name,
+                                    "topic": analysis.topic,
+                                    "procedure": procedure_info.steps or [],
+                                    "type": procedure_info.type,
+                                    "transformation": procedure_info.transformation,
+                                    "exercise_count": 0,
+                                    "exercises": []
+                                }
+                            core_loops[core_loop_id]["exercise_count"] += 1
+                            if merged_ex["id"] not in core_loops[core_loop_id]["exercises"]:
+                                core_loops[core_loop_id]["exercises"].append(merged_ex["id"])
 
             # Convert sets to lists for JSON serialization
             for topic_data in topics.values():
                 topic_data["core_loops"] = list(topic_data["core_loops"])
 
-            # Deduplicate topics and core loops
-            topics = self._deduplicate_topics(topics)
-            core_loops = self._deduplicate_core_loops(core_loops)
+            # Deduplicate against existing database entries first, then within batch
+            topics = self._deduplicate_topics_with_database(topics, course_code, db)
+            core_loops = self._deduplicate_core_loops_with_database(core_loops, course_code, db)
 
             # Log summary statistics
             accepted_count = len(merged_exercises) - low_confidence_count
@@ -572,7 +685,7 @@ Respond ONLY with valid JSON, no other text.
                 "accepted_count": accepted_count
             }
 
-    def _similarity(self, str1: str, str2: str) -> float:
+    def _similarity(self, str1: str, str2: str) -> Tuple[float, str]:
         """Calculate similarity between two strings (0.0 to 1.0).
 
         Args:
@@ -580,12 +693,21 @@ Respond ONLY with valid JSON, no other text.
             str2: Second string
 
         Returns:
-            Similarity score (0.0 = completely different, 1.0 = identical)
+            Tuple of (similarity score, reason)
+            - similarity: 0.0 = completely different, 1.0 = identical
+            - reason: "semantic_similarity", "translation", "string_similarity", etc.
         """
-        return SequenceMatcher(None, str1.lower(), str2.lower()).ratio()
+        if self.use_semantic and self.semantic_matcher:
+            # Use semantic similarity
+            result = self.semantic_matcher.should_merge(str1, str2, threshold=0.0)
+            return result.similarity_score, result.reason
+        else:
+            # Fallback to string similarity
+            similarity = SequenceMatcher(None, str1.lower(), str2.lower()).ratio()
+            return similarity, "string_similarity"
 
     def _deduplicate_topics(self, topics: Dict[str, Any]) -> Dict[str, Any]:
-        """Deduplicate similar topics using string similarity.
+        """Deduplicate similar topics using semantic similarity.
 
         Args:
             topics: Dictionary of topics
@@ -596,7 +718,7 @@ Respond ONLY with valid JSON, no other text.
         if len(topics) <= 1:
             return topics
 
-        threshold = Config.CORE_LOOP_SIMILARITY_THRESHOLD
+        threshold = Config.SEMANTIC_SIMILARITY_THRESHOLD if self.use_semantic else Config.CORE_LOOP_SIMILARITY_THRESHOLD
         topic_names = list(topics.keys())
         merged_topics = {}
         skip_topics = set()
@@ -620,24 +742,37 @@ Respond ONLY with valid JSON, no other text.
                 if topic2 in skip_topics:
                     continue
 
-                similarity = self._similarity(topic1, topic2)
-                if similarity >= threshold:
-                    print(f"[DEBUG] Merging similar topics: '{topic1}' ≈ '{topic2}' (similarity: {similarity:.2f})")
-
-                    # Merge topic2 into canonical
-                    canonical_data["exercise_count"] += topics[topic2]["exercise_count"]
-                    canonical_data["core_loops"] = list(set(canonical_data["core_loops"]) | set(topics[topic2]["core_loops"]))
-                    skip_topics.add(topic2)
-
-                    # Map merged topic to canonical
-                    self.topic_name_mapping[topic2] = canonical_topic
+                # Use semantic matching if available
+                if self.use_semantic and self.semantic_matcher:
+                    result = self.semantic_matcher.should_merge(topic1, topic2, threshold)
+                    if result.should_merge:
+                        print(f"[DEDUP] Topic '{topic1}' → '{topic2}' (similarity: {result.similarity_score:.2f}, reason: {result.reason})")
+                        # Merge topic2 into canonical
+                        canonical_data["exercise_count"] += topics[topic2]["exercise_count"]
+                        canonical_data["core_loops"] = list(set(canonical_data["core_loops"]) | set(topics[topic2]["core_loops"]))
+                        skip_topics.add(topic2)
+                        # Map merged topic to canonical
+                        self.topic_name_mapping[topic2] = canonical_topic
+                    elif Config.SEMANTIC_LOG_NEAR_MISSES and result.similarity_score >= 0.80:
+                        print(f"[SKIP] Topic '{topic1}' ≠ '{topic2}' (similarity: {result.similarity_score:.2f}, reason: {result.reason})")
+                else:
+                    # Fallback to string similarity
+                    similarity, reason = self._similarity(topic1, topic2)
+                    if similarity >= threshold:
+                        print(f"[DEBUG] Merging similar topics: '{topic1}' ≈ '{topic2}' (similarity: {similarity:.2f})")
+                        # Merge topic2 into canonical
+                        canonical_data["exercise_count"] += topics[topic2]["exercise_count"]
+                        canonical_data["core_loops"] = list(set(canonical_data["core_loops"]) | set(topics[topic2]["core_loops"]))
+                        skip_topics.add(topic2)
+                        # Map merged topic to canonical
+                        self.topic_name_mapping[topic2] = canonical_topic
 
             merged_topics[canonical_topic] = canonical_data
 
         return merged_topics
 
     def _deduplicate_core_loops(self, core_loops: Dict[str, Any]) -> Dict[str, Any]:
-        """Deduplicate similar core loops using string similarity.
+        """Deduplicate similar core loops using semantic similarity.
 
         Args:
             core_loops: Dictionary of core loops
@@ -648,7 +783,7 @@ Respond ONLY with valid JSON, no other text.
         if len(core_loops) <= 1:
             return core_loops
 
-        threshold = Config.CORE_LOOP_SIMILARITY_THRESHOLD
+        threshold = Config.SEMANTIC_SIMILARITY_THRESHOLD if self.use_semantic else Config.CORE_LOOP_SIMILARITY_THRESHOLD
         loop_ids = list(core_loops.keys())
         merged_loops = {}
         skip_loops = set()
@@ -673,24 +808,178 @@ Respond ONLY with valid JSON, no other text.
                     continue
 
                 loop2 = core_loops[loop2_id]
-                similarity = self._similarity(loop1["name"], loop2["name"])
 
-                if similarity >= threshold:
-                    print(f"[DEBUG] Merging similar core loops: '{loop1['name']}' ≈ '{loop2['name']}' (similarity: {similarity:.2f})")
-
-                    # Merge loop2 into canonical
-                    canonical_data["exercise_count"] += loop2["exercise_count"]
-                    canonical_data["exercises"] = list(set(canonical_data["exercises"]) | set(loop2["exercises"]))
-
-                    # Merge procedures (prefer longer/more detailed one)
-                    if len(loop2.get("procedure", [])) > len(canonical_data.get("procedure", [])):
-                        canonical_data["procedure"] = loop2["procedure"]
-
-                    skip_loops.add(loop2_id)
-
-                    # Map merged ID to canonical ID
-                    self.core_loop_id_mapping[loop2_id] = canonical_id
+                # Use semantic matching if available
+                if self.use_semantic and self.semantic_matcher:
+                    result = self.semantic_matcher.should_merge(
+                        loop1["name"], loop2["name"], threshold
+                    )
+                    if result.should_merge:
+                        print(f"[DEDUP] Core loop '{loop1['name']}' → '{loop2['name']}' (similarity: {result.similarity_score:.2f}, reason: {result.reason})")
+                        # Merge loop2 into canonical
+                        canonical_data["exercise_count"] += loop2["exercise_count"]
+                        canonical_data["exercises"] = list(set(canonical_data["exercises"]) | set(loop2["exercises"]))
+                        # Merge procedures (prefer longer/more detailed one)
+                        if len(loop2.get("procedure", [])) > len(canonical_data.get("procedure", [])):
+                            canonical_data["procedure"] = loop2["procedure"]
+                        skip_loops.add(loop2_id)
+                        # Map merged ID to canonical ID
+                        self.core_loop_id_mapping[loop2_id] = canonical_id
+                    elif Config.SEMANTIC_LOG_NEAR_MISSES and result.similarity_score >= 0.80:
+                        print(f"[SKIP] Core loop '{loop1['name']}' ≠ '{loop2['name']}' (similarity: {result.similarity_score:.2f}, reason: {result.reason})")
+                else:
+                    # Fallback to string similarity
+                    similarity, reason = self._similarity(loop1["name"], loop2["name"])
+                    if similarity >= threshold:
+                        print(f"[DEBUG] Merging similar core loops: '{loop1['name']}' ≈ '{loop2['name']}' (similarity: {similarity:.2f})")
+                        # Merge loop2 into canonical
+                        canonical_data["exercise_count"] += loop2["exercise_count"]
+                        canonical_data["exercises"] = list(set(canonical_data["exercises"]) | set(loop2["exercises"]))
+                        # Merge procedures (prefer longer/more detailed one)
+                        if len(loop2.get("procedure", [])) > len(canonical_data.get("procedure", [])):
+                            canonical_data["procedure"] = loop2["procedure"]
+                        skip_loops.add(loop2_id)
+                        # Map merged ID to canonical ID
+                        self.core_loop_id_mapping[loop2_id] = canonical_id
 
             merged_loops[canonical_id] = canonical_data
 
         return merged_loops
+
+    def _deduplicate_topics_with_database(self, topics: Dict[str, Any],
+                                          course_code: str,
+                                          db) -> Dict[str, Any]:
+        """Deduplicate topics against existing database entries, then within batch.
+
+        Args:
+            topics: Dictionary of new topics from current analysis
+            course_code: Course code
+            db: Database instance
+
+        Returns:
+            Deduplicated topics dictionary with mappings to existing DB topics
+        """
+        threshold = Config.SEMANTIC_SIMILARITY_THRESHOLD if self.use_semantic else Config.CORE_LOOP_SIMILARITY_THRESHOLD
+
+        # Load existing topics from database
+        existing_topics = db.get_topics_by_course(course_code)
+        existing_topic_map = {t['name']: t for t in existing_topics}
+
+        # Track mappings from new topic names to canonical (db or batch) names
+        topic_mapping = {}
+        deduplicated_topics = {}
+
+        for new_topic_name, new_topic_data in topics.items():
+            matched_existing = None
+            best_similarity = 0.0
+            best_reason = ""
+
+            # Check against existing database topics first
+            for existing_name in existing_topic_map.keys():
+                if self.use_semantic and self.semantic_matcher:
+                    result = self.semantic_matcher.should_merge(
+                        new_topic_name, existing_name, threshold
+                    )
+                    if result.should_merge and result.similarity_score > best_similarity:
+                        best_similarity = result.similarity_score
+                        matched_existing = existing_name
+                        best_reason = result.reason
+                else:
+                    similarity, reason = self._similarity(new_topic_name, existing_name)
+                    if similarity >= threshold and similarity > best_similarity:
+                        best_similarity = similarity
+                        matched_existing = existing_name
+                        best_reason = reason
+
+            if matched_existing:
+                # Reuse existing topic
+                print(f"[DEDUP] Topic '{new_topic_name}' → existing '{matched_existing}' (similarity: {best_similarity:.2f}, reason: {best_reason})")
+                topic_mapping[new_topic_name] = matched_existing
+                # Don't add to deduplicated_topics, we'll use DB entry
+            else:
+                # New topic, add to batch
+                deduplicated_topics[new_topic_name] = new_topic_data
+                topic_mapping[new_topic_name] = new_topic_name
+
+        # Now deduplicate within the new batch
+        deduplicated_topics = self._deduplicate_topics(deduplicated_topics)
+
+        # Update topic mapping with any batch deduplication
+        if hasattr(self, 'topic_name_mapping'):
+            for old_name, canonical_name in self.topic_name_mapping.items():
+                if old_name in topic_mapping:
+                    topic_mapping[old_name] = canonical_name
+
+        # Store the mapping for later use
+        self.topic_name_mapping = topic_mapping
+
+        return deduplicated_topics
+
+    def _deduplicate_core_loops_with_database(self, core_loops: Dict[str, Any],
+                                              course_code: str,
+                                              db) -> Dict[str, Any]:
+        """Deduplicate core loops against existing database entries, then within batch.
+
+        Args:
+            core_loops: Dictionary of new core loops from current analysis
+            course_code: Course code
+            db: Database instance
+
+        Returns:
+            Deduplicated core loops dictionary with mappings to existing DB loops
+        """
+        threshold = Config.SEMANTIC_SIMILARITY_THRESHOLD if self.use_semantic else Config.CORE_LOOP_SIMILARITY_THRESHOLD
+
+        # Load existing core loops from database
+        existing_loops = db.get_core_loops_by_course(course_code)
+        existing_loop_map = {loop['id']: loop for loop in existing_loops}
+
+        # Track mappings from new loop IDs to canonical (db or batch) IDs
+        loop_id_mapping = {}
+        deduplicated_loops = {}
+
+        for new_loop_id, new_loop_data in core_loops.items():
+            matched_existing = None
+            best_similarity = 0.0
+            best_reason = ""
+
+            # Check against existing database loops first
+            for existing_loop in existing_loops:
+                if self.use_semantic and self.semantic_matcher:
+                    result = self.semantic_matcher.should_merge(
+                        new_loop_data['name'], existing_loop['name'], threshold
+                    )
+                    if result.should_merge and result.similarity_score > best_similarity:
+                        best_similarity = result.similarity_score
+                        matched_existing = existing_loop['id']
+                        best_reason = result.reason
+                else:
+                    similarity, reason = self._similarity(new_loop_data['name'], existing_loop['name'])
+                    if similarity >= threshold and similarity > best_similarity:
+                        best_similarity = similarity
+                        matched_existing = existing_loop['id']
+                        best_reason = reason
+
+            if matched_existing:
+                # Reuse existing loop
+                print(f"[DEDUP] Core loop '{new_loop_data['name']}' → existing '{existing_loop_map[matched_existing]['name']}' (similarity: {best_similarity:.2f}, reason: {best_reason})")
+                loop_id_mapping[new_loop_id] = matched_existing
+                # Don't add to deduplicated_loops, we'll use DB entry
+            else:
+                # New loop, add to batch
+                deduplicated_loops[new_loop_id] = new_loop_data
+                loop_id_mapping[new_loop_id] = new_loop_id
+
+        # Now deduplicate within the new batch
+        deduplicated_loops = self._deduplicate_core_loops(deduplicated_loops)
+
+        # Update loop mapping with any batch deduplication
+        if hasattr(self, 'core_loop_id_mapping'):
+            for old_id, canonical_id in self.core_loop_id_mapping.items():
+                if old_id in loop_id_mapping:
+                    loop_id_mapping[old_id] = canonical_id
+
+        # Store the mapping for later use
+        self.core_loop_id_mapping = loop_id_mapping
+
+        return deduplicated_loops

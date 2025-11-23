@@ -16,7 +16,7 @@ from storage.file_manager import FileManager
 from storage.vector_store import VectorStore
 from core.pdf_processor import PDFProcessor
 from core.exercise_splitter import ExerciseSplitter
-from core.analyzer import ExerciseAnalyzer
+from core.analyzer import ExerciseAnalyzer, AnalysisResult
 from models.llm_manager import LLMManager
 from study_context import study_plan
 
@@ -165,6 +165,24 @@ def info(course):
                 for topic in topics:
                     core_loops = db.get_core_loops_by_topic(topic['id'])
                     console.print(f"  • {topic['name']} ({len(core_loops)} core loops)")
+
+            # Show multi-procedure statistics
+            multi_proc_exercises = db.get_exercises_with_multiple_procedures(found_course['code'])
+            if multi_proc_exercises:
+                console.print(f"\n[bold]Multi-Procedure Exercises:[/bold]")
+                console.print(f"  {len(multi_proc_exercises)}/{len(exercises)} exercises cover multiple procedures")
+
+                # Show top 3 examples
+                console.print(f"\n[bold]Top Examples:[/bold]")
+                for ex in multi_proc_exercises[:3]:
+                    # Get all core loops for this exercise
+                    core_loops = db.get_exercise_core_loops(ex['id'])
+                    console.print(f"  • Exercise {ex['exercise_number'] or ex['id'][:8]}: {ex['core_loop_count']} procedures")
+                    for cl in core_loops[:3]:  # Show first 3 procedures
+                        step_info = f" (point {cl['step_number']})" if cl['step_number'] else ""
+                        console.print(f"    - {cl['name']}{step_info}")
+                    if ex['core_loop_count'] > 3:
+                        console.print(f"    ... and {ex['core_loop_count'] - 3} more")
 
             console.print()
 
@@ -509,25 +527,60 @@ def analyze(course, limit, provider, lang, force, parallel, batch_size):
                     if canonical_topic_name in topic_name_mapping:
                         canonical_topic_name = topic_name_mapping[canonical_topic_name]
 
-                    # Get topic_id and core_loop_id
+                    # Get topic_id
                     topic_rows = db.get_topics_by_course(course_code)
                     topic_id = next((t['id'] for t in topic_rows if t['name'] == canonical_topic_name), None)
 
-                    # Map core_loop_id to canonical ID (if deduplicated)
-                    canonical_core_loop_id = analysis.core_loop_id
-                    if canonical_core_loop_id and canonical_core_loop_id in core_loop_id_mapping:
-                        canonical_core_loop_id = core_loop_id_mapping[canonical_core_loop_id]
+                    # Get primary core_loop_id (first procedure) for backward compatibility
+                    primary_core_loop_id = analysis.core_loop_id
+                    if primary_core_loop_id and primary_core_loop_id in core_loop_id_mapping:
+                        primary_core_loop_id = core_loop_id_mapping[primary_core_loop_id]
 
-                    # Only update if canonical_core_loop_id exists in deduplicated core_loops
-                    if canonical_core_loop_id and canonical_core_loop_id not in core_loops:
-                        print(f"[DEBUG] Skipping exercise {first_id[:20]}... - core_loop_id '{canonical_core_loop_id}' not found in deduplicated core_loops")
-                        canonical_core_loop_id = None
+                    # Only update if primary_core_loop_id exists in deduplicated core_loops
+                    if primary_core_loop_id and primary_core_loop_id not in core_loops:
+                        print(f"[DEBUG] Skipping exercise {first_id[:20]}... - core_loop_id '{primary_core_loop_id}' not found in deduplicated core_loops")
+                        primary_core_loop_id = None
 
-                    db.conn.execute("""
-                        UPDATE exercises
-                        SET topic_id = ?, core_loop_id = ?, difficulty = ?, analyzed = 1
-                        WHERE id = ?
-                    """, (topic_id, canonical_core_loop_id, analysis.difficulty, first_id))
+                    # Collect tags for flexible search
+                    tags = []
+
+                    # Process ALL procedures - link to junction table
+                    if analysis.procedures:
+                        for procedure_info in analysis.procedures:
+                            proc_core_loop_id = AnalysisResult._normalize_core_loop_id(procedure_info.name)
+
+                            # Map to canonical ID if deduplicated
+                            if proc_core_loop_id and proc_core_loop_id in core_loop_id_mapping:
+                                proc_core_loop_id = core_loop_id_mapping[proc_core_loop_id]
+
+                            # Link exercise to core loop via junction table
+                            if proc_core_loop_id and proc_core_loop_id in core_loops:
+                                db.link_exercise_to_core_loop(
+                                    exercise_id=first_id,
+                                    core_loop_id=proc_core_loop_id,
+                                    step_number=procedure_info.point_number
+                                )
+
+                                # Collect tags
+                                tags.append(procedure_info.type)
+                                if procedure_info.transformation:
+                                    src = procedure_info.transformation.get('source_format', '').lower().replace(' ', '_')
+                                    tgt = procedure_info.transformation.get('target_format', '').lower().replace(' ', '_')
+                                    tags.append(f"transform_{src}_to_{tgt}")
+
+                    # Update exercise with primary core loop and metadata
+                    db.update_exercise_analysis(
+                        exercise_id=first_id,
+                        topic_id=topic_id,
+                        core_loop_id=primary_core_loop_id,
+                        difficulty=analysis.difficulty,
+                        variations=analysis.variations,
+                        analyzed=True
+                    )
+
+                    # Update tags
+                    if tags:
+                        db.update_exercise_tags(first_id, list(set(tags)))
 
             db.conn.commit()
             console.print("   ✓ Stored in database\n")
@@ -584,12 +637,27 @@ def analyze(course, limit, provider, lang, force, parallel, batch_size):
 @click.option('--loop', '-l', required=True, help='Core loop ID to learn')
 @click.option('--lang', type=click.Choice(['en', 'it']), default='en',
               help='Output language (default: en)')
-def learn(course, loop, lang):
-    """Learn core loops with AI tutor explanation."""
+@click.option('--depth', '-d', type=click.Choice(['basic', 'medium', 'advanced']), default='medium',
+              help='Explanation depth: basic (concise), medium (balanced), advanced (comprehensive)')
+@click.option('--no-concepts', is_flag=True,
+              help='Skip prerequisite concept explanations')
+@click.option('--adaptive/--no-adaptive', default=True,
+              help='Use adaptive teaching (auto-select depth based on mastery, default: enabled)')
+@click.option('--strategy', is_flag=True,
+              help='Include study strategy and metacognitive guidance')
+def learn(course, loop, lang, depth, no_concepts, adaptive, strategy):
+    """Learn core loops with AI tutor explanation (enhanced with WHY reasoning)."""
     from core.tutor import Tutor
     from models.llm_manager import LLMManager
 
-    console.print(f"\n[bold cyan]Learning {loop}...[/bold cyan]\n")
+    console.print(f"\n[bold cyan]Learning {loop}...[/bold cyan]")
+
+    if adaptive:
+        console.print(f"[dim]Mode: Adaptive teaching (depth and prerequisites auto-selected based on mastery)[/dim]\n")
+    elif not no_concepts:
+        console.print(f"[dim]Mode: Enhanced learning with foundational concepts (depth: {depth})[/dim]\n")
+    else:
+        console.print(f"[dim]Mode: Direct explanation without prerequisites (depth: {depth})[/dim]\n")
 
     try:
         # Find course
@@ -607,21 +675,37 @@ def learn(course, loop, lang):
 
             course_code = found_course['code']
 
-        # Initialize tutor
+        # Initialize tutor with enhanced learning
         llm = LLMManager(provider="anthropic")
         tutor = Tutor(llm, language=lang)
 
-        # Get explanation
-        console.print("🤖 Generating explanation...\n")
-        result = tutor.learn(course_code, loop)
+        # Get enhanced explanation
+        console.print("🤖 Generating deep explanation with reasoning...\n")
+        result = tutor.learn(
+            course_code=course_code,
+            core_loop_id=loop,
+            explain_concepts=not no_concepts,
+            depth=depth,
+            adaptive=adaptive,
+            include_study_strategy=strategy
+        )
 
         if not result.success:
             console.print(f"[red]Error: {result.content}[/red]\n")
             return
 
         # Display explanation
-        console.print(result.content)
-        console.print(f"\n[dim]Core loop: {loop} | Examples used: {result.metadata.get('examples_count', 0)}[/dim]\n")
+        from rich.markdown import Markdown
+        md = Markdown(result.content)
+        console.print(md)
+
+        # Display metadata
+        includes_prereqs = result.metadata.get('includes_prerequisites', False)
+        examples_count = result.metadata.get('examples_count', 0)
+        actual_depth = result.metadata.get('depth', depth)
+        prereq_status = "with prerequisites" if includes_prereqs else "without prerequisites"
+        adaptive_status = "adaptive" if result.metadata.get('adaptive', False) else "manual"
+        console.print(f"\n[dim]Core loop: {loop} | Depth: {actual_depth} | {prereq_status} | Examples: {examples_count} | Mode: {adaptive_status}[/dim]\n")
 
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {e}\n")
@@ -774,13 +858,17 @@ def generate(course, loop, difficulty, lang):
 @click.option('--course', '-c', required=True, help='Course code (e.g., B006802 or ADE)')
 @click.option('--questions', '-n', type=int, default=10, help='Number of questions (default: 10)')
 @click.option('--topic', '-t', help='Filter by topic')
-@click.option('--loop', '-l', help='Filter by core loop ID')
+@click.option('--loop', '-l', help='Filter by core loop ID or name pattern')
 @click.option('--difficulty', '-d', type=click.Choice(['easy', 'medium', 'hard']),
               help='Filter by difficulty')
 @click.option('--review-only', is_flag=True, help='Only exercises due for review')
+@click.option('--procedure', '-p',
+              type=click.Choice(['design', 'transformation', 'verification', 'minimization', 'analysis', 'implementation']),
+              help='Filter by procedure type')
+@click.option('--tags', help='Filter by tags (comma-separated)')
 @click.option('--lang', type=click.Choice(['en', 'it']), default='en',
               help='Language for feedback (default: en)')
-def quiz(course, questions, topic, loop, difficulty, review_only, lang):
+def quiz(course, questions, topic, loop, difficulty, review_only, procedure, tags, lang):
     """Take an interactive quiz to test your knowledge."""
     from core.quiz_engine import QuizEngine
     from models.llm_manager import LLMManager
@@ -819,7 +907,9 @@ def quiz(course, questions, topic, loop, difficulty, review_only, lang):
                 topic=topic,
                 core_loop=loop,
                 difficulty=difficulty,
-                review_only=review_only
+                review_only=review_only,
+                procedure_type=procedure,
+                tags=tags
             )
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]\n")
@@ -1199,6 +1289,445 @@ def progress(course, topics, detailed):
         # Next steps
         console.print("[dim]Use 'examina suggest --course {0}' for study recommendations[/dim]".format(course_code))
         console.print("[dim]Use 'examina quiz --course {0}' to start practicing[/dim]\n".format(course_code))
+
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}\n")
+        import traceback
+        traceback.print_exc()
+        raise click.Abort()
+
+
+@cli.command()
+@click.option('--course', '-c', required=True, help='Course code')
+@click.option('--loop', '-l', required=True, help='Core loop ID or name')
+@click.option('--difficulty', '-d', type=click.Choice(['easy', 'medium', 'hard']), default='medium',
+              help='Difficulty level for strategy adaptation (default: medium)')
+@click.option('--lang', type=click.Choice(['en', 'it']), default='en',
+              help='Output language (default: en)')
+def strategy(course, loop, difficulty, lang):
+    """View study strategy and metacognitive guidance for a core loop."""
+    from core.study_strategies import StudyStrategyManager
+    from rich.markdown import Markdown
+
+    console.print(f"\n[bold cyan]Study Strategy for {loop}...[/bold cyan]\n")
+
+    try:
+        # Find course
+        with Database() as db:
+            all_courses = db.get_all_courses()
+            found_course = None
+            for c in all_courses:
+                if c['code'] == course or c['acronym'] == course:
+                    found_course = c
+                    break
+
+            if not found_course:
+                console.print(f"[red]Course '{course}' not found.[/red]\n")
+                return
+
+            course_code = found_course['code']
+
+            # Get core loop details
+            core_loop = db.conn.execute("""
+                SELECT cl.*, t.name as topic_name
+                FROM core_loops cl
+                JOIN topics t ON cl.topic_id = t.id
+                WHERE cl.id = ? AND t.course_code = ?
+            """, (loop, course_code)).fetchone()
+
+            if not core_loop:
+                # Try searching by name pattern
+                core_loop = db.conn.execute("""
+                    SELECT cl.*, t.name as topic_name
+                    FROM core_loops cl
+                    JOIN topics t ON cl.topic_id = t.id
+                    WHERE cl.name LIKE ? AND t.course_code = ?
+                    LIMIT 1
+                """, (f"%{loop}%", course_code)).fetchone()
+
+            if not core_loop:
+                console.print(f"[red]Core loop '{loop}' not found for course {course}.[/red]\n")
+                console.print("Use 'examina info --course {0}' to see available core loops.\n".format(course))
+                return
+
+        core_loop_dict = dict(core_loop)
+        core_loop_name = core_loop_dict.get('name', '')
+
+        # Initialize strategy manager
+        strategy_mgr = StudyStrategyManager(language=lang)
+
+        # Get strategy
+        strat = strategy_mgr.get_strategy_for_core_loop(core_loop_name, difficulty=difficulty)
+
+        if not strat:
+            console.print(f"[yellow]No specific strategy found for '{core_loop_name}'.[/yellow]\n")
+            console.print("This core loop may be new or not yet covered by the strategy system.\n")
+            return
+
+        # Format and display
+        formatted_strategy = strategy_mgr.format_strategy_output(strat, core_loop_name)
+        md = Markdown(formatted_strategy)
+        console.print(md)
+
+        console.print(f"\n[dim]Core loop: {core_loop_name} | Difficulty: {difficulty} | Language: {lang}[/dim]\n")
+
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}\n")
+        import traceback
+        traceback.print_exc()
+        raise click.Abort()
+
+
+@cli.command()
+@click.option('--course', '-c', required=True, help='Course code')
+@click.option('--limit', '-n', type=int, default=10, help='Number of items in learning path (default: 10)')
+@click.option('--lang', type=click.Choice(['en', 'it']), default='en',
+              help='Output language (default: en)')
+def path(course, limit, lang):
+    """Show personalized learning path based on mastery and spaced repetition."""
+    from core.adaptive_teaching import AdaptiveTeachingManager
+    from rich.table import Table
+    from rich.panel import Panel
+
+    try:
+        # Find course
+        with Database() as db:
+            all_courses = db.get_all_courses()
+            found_course = None
+            for c in all_courses:
+                if c['code'] == course or c['acronym'] == course:
+                    found_course = c
+                    break
+
+            if not found_course:
+                console.print(f"\n[red]Course '{course}' not found.[/red]\n")
+                console.print("Use 'examina courses' to see available courses.\n")
+                return
+
+            course_code = found_course['code']
+
+        # Get personalized learning path
+        with AdaptiveTeachingManager() as atm:
+            learning_path = atm.get_personalized_learning_path(course_code, limit=limit)
+
+        if not learning_path:
+            console.print(f"\n[yellow]No learning path available yet.[/yellow]")
+            console.print(f"[dim]Start by taking quizzes to build your progress data.[/dim]\n")
+            return
+
+        # Display header
+        console.print(f"\n[bold cyan]📚 Personalized Learning Path[/bold cyan]")
+        console.print(f"[dim]{found_course['name']} ({found_course['acronym']})[/dim]\n")
+
+        # Create table
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("#", style="cyan", justify="center", width=3)
+        table.add_column("Action", style="yellow", width=10)
+        table.add_column("Core Loop", style="white")
+        table.add_column("Topic", style="dim")
+        table.add_column("Reason", style="green")
+        table.add_column("Time", justify="right", style="magenta")
+
+        for item in learning_path:
+            # Format action with emoji
+            action_icons = {
+                'review': '🔄',
+                'strengthen': '💪',
+                'learn': '📖',
+                'practice': '✍️'
+            }
+            action_display = f"{action_icons.get(item['action'], '•')} {item['action'].title()}"
+
+            # Format urgency color
+            urgency_colors = {
+                'high': 'red',
+                'medium': 'yellow',
+                'low': 'dim'
+            }
+            urgency_color = urgency_colors.get(item.get('urgency', 'low'), 'dim')
+
+            table.add_row(
+                str(item['priority']),
+                action_display,
+                f"[{urgency_color}]{item['core_loop']}[/{urgency_color}]",
+                item['topic'],
+                item['reason'],
+                f"{item['estimated_time']}m"
+            )
+
+        console.print(table)
+        console.print(f"\n[dim]Total estimated time: {sum(item['estimated_time'] for item in learning_path)} minutes[/dim]\n")
+
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}\n")
+        import traceback
+        traceback.print_exc()
+        raise click.Abort()
+
+
+@cli.command()
+@click.option('--course', '-c', required=True, help='Course code')
+@click.option('--loop', '-l', help='Filter by specific core loop')
+@click.option('--lang', type=click.Choice(['en', 'it']), default='en',
+              help='Output language (default: en)')
+def gaps(course, loop, lang):
+    """Identify knowledge gaps and weak areas."""
+    from core.adaptive_teaching import AdaptiveTeachingManager
+    from rich.table import Table
+    from rich.panel import Panel
+
+    try:
+        # Find course
+        with Database() as db:
+            all_courses = db.get_all_courses()
+            found_course = None
+            for c in all_courses:
+                if c['code'] == course or c['acronym'] == course:
+                    found_course = c
+                    break
+
+            if not found_course:
+                console.print(f"\n[red]Course '{course}' not found.[/red]\n")
+                console.print("Use 'examina courses' to see available courses.\n")
+                return
+
+            course_code = found_course['code']
+
+        # Detect knowledge gaps
+        with AdaptiveTeachingManager() as atm:
+            knowledge_gaps = atm.detect_knowledge_gaps(course_code, core_loop_name=loop)
+
+        if not knowledge_gaps:
+            console.print(f"\n[green]✅ No significant knowledge gaps detected![/green]")
+            console.print(f"[dim]Your mastery levels look good across all topics.[/dim]\n")
+            return
+
+        # Display header
+        console.print(f"\n[bold cyan]🔍 Knowledge Gaps Analysis[/bold cyan]")
+        console.print(f"[dim]{found_course['name']} ({found_course['acronym']})[/dim]\n")
+
+        # Group by severity
+        high_gaps = [g for g in knowledge_gaps if g['severity'] == 'high']
+        medium_gaps = [g for g in knowledge_gaps if g['severity'] == 'medium']
+        low_gaps = [g for g in knowledge_gaps if g['severity'] == 'low']
+
+        # Display high priority gaps
+        if high_gaps:
+            console.print("[bold red]⚠️  High Priority Gaps[/bold red]\n")
+            for gap in high_gaps:
+                mastery_pct = int(gap['mastery'] * 100)
+                console.print(f"  [red]•[/red] [bold]{gap['gap']}[/bold] ({gap['topic']})")
+                console.print(f"    Mastery: {mastery_pct}%")
+                console.print(f"    💡 {gap['recommendation']}")
+                if gap['impact']:
+                    console.print(f"    Affects: {', '.join(gap['impact'][:3])}")
+                console.print()
+
+        # Display medium priority gaps
+        if medium_gaps:
+            console.print("[bold yellow]⚡ Medium Priority Gaps[/bold yellow]\n")
+            for gap in medium_gaps:
+                mastery_pct = int(gap['mastery'] * 100)
+                console.print(f"  [yellow]•[/yellow] {gap['gap']} ({gap['topic']}) - {mastery_pct}% mastery")
+                console.print(f"    💡 {gap['recommendation']}\n")
+
+        # Display low priority gaps (summarized)
+        if low_gaps:
+            console.print(f"[dim]ℹ️  {len(low_gaps)} additional area(s) for improvement (low priority)[/dim]\n")
+
+        # Summary
+        console.print(f"[bold]Summary:[/bold]")
+        console.print(f"  Total gaps found: {len(knowledge_gaps)}")
+        console.print(f"  High priority: {len(high_gaps)}")
+        console.print(f"  Medium priority: {len(medium_gaps)}")
+        console.print(f"  Low priority: {len(low_gaps)}\n")
+
+        console.print(f"[dim]Use 'examina path --course {course}' to see a personalized study plan[/dim]\n")
+
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}\n")
+        import traceback
+        traceback.print_exc()
+        raise click.Abort()
+
+
+@cli.command()
+@click.option('--course', '-c', required=True, help='Course code')
+@click.option('--dry-run', is_flag=True, help='Show what would be merged without making changes')
+@click.option('--threshold', type=float, default=None, help='Similarity threshold (0.0-1.0, default: 0.85 for semantic, 0.85 for string)')
+def deduplicate(course, dry_run, threshold):
+    """Merge duplicate topics and core loops using semantic similarity."""
+    from difflib import SequenceMatcher
+
+    # Try to import semantic matcher
+    try:
+        from core.semantic_matcher import SemanticMatcher
+        if Config.SEMANTIC_SIMILARITY_ENABLED:
+            semantic_matcher = SemanticMatcher()
+            use_semantic = semantic_matcher.enabled
+            if use_semantic:
+                console.print("[info]Using semantic similarity matching[/info]")
+                default_threshold = Config.SEMANTIC_SIMILARITY_THRESHOLD
+            else:
+                console.print("[yellow]Semantic matcher unavailable, using string similarity[/yellow]")
+                use_semantic = False
+                default_threshold = Config.CORE_LOOP_SIMILARITY_THRESHOLD
+        else:
+            console.print("[info]Semantic matching disabled, using string similarity[/info]")
+            use_semantic = False
+            semantic_matcher = None
+            default_threshold = Config.CORE_LOOP_SIMILARITY_THRESHOLD
+    except ImportError:
+        console.print("[yellow]SemanticMatcher not available, using string similarity[/yellow]")
+        use_semantic = False
+        semantic_matcher = None
+        default_threshold = Config.CORE_LOOP_SIMILARITY_THRESHOLD
+
+    # Use provided threshold or default
+    threshold = threshold if threshold is not None else default_threshold
+
+    console.print(f"\n[bold cyan]Deduplicating {course}...[/bold cyan]")
+    console.print(f"[info]Threshold: {threshold:.2f}[/info]\n")
+
+    if dry_run:
+        console.print("[yellow]DRY RUN MODE - No changes will be made[/yellow]\n")
+
+    try:
+        with Database() as db:
+            # Find course
+            all_courses = db.get_all_courses()
+            found_course = None
+            for c in all_courses:
+                if c['code'] == course or c['acronym'] == course:
+                    found_course = c
+                    break
+
+            if not found_course:
+                console.print(f"[red]Course '{course}' not found.[/red]\n")
+                return
+
+            course_code = found_course['code']
+
+            # Deduplicate topics
+            console.print("[bold]Deduplicating Topics...[/bold]")
+            topics = db.get_topics_by_course(course_code)
+            topic_merges = []
+            topic_skips = []
+
+            for i, topic1 in enumerate(topics):
+                for topic2 in topics[i+1:]:
+                    if use_semantic and semantic_matcher:
+                        result = semantic_matcher.should_merge(
+                            topic1['name'], topic2['name'], threshold
+                        )
+                        if result.should_merge:
+                            topic_merges.append((topic1, topic2, result.similarity_score, result.reason))
+                        elif Config.SEMANTIC_LOG_NEAR_MISSES and result.similarity_score >= 0.80:
+                            topic_skips.append((topic1, topic2, result.similarity_score, result.reason))
+                    else:
+                        similarity = SequenceMatcher(None, topic1['name'].lower(), topic2['name'].lower()).ratio()
+                        if similarity >= threshold:
+                            topic_merges.append((topic1, topic2, similarity, "string_similarity"))
+
+            if topic_merges:
+                console.print(f"Found {len(topic_merges)} topic pairs to merge:\n")
+                for t1, t2, sim, reason in topic_merges:
+                    console.print(f"  • '{t1['name']}' ← '{t2['name']}'")
+                    console.print(f"    Similarity: {sim:.2f}, Reason: {reason}")
+
+                if not dry_run:
+                    for t1, t2, sim, reason in topic_merges:
+                        # Update all exercises to use canonical topic
+                        db.conn.execute("""
+                            UPDATE exercises SET topic_id = ? WHERE topic_id = ?
+                        """, (t1['id'], t2['id']))
+
+                        # Update all core loops to use canonical topic
+                        db.conn.execute("""
+                            UPDATE core_loops SET topic_id = ? WHERE topic_id = ?
+                        """, (t1['id'], t2['id']))
+
+                        # Delete duplicate topic
+                        db.conn.execute("DELETE FROM topics WHERE id = ?", (t2['id'],))
+
+                    db.conn.commit()
+                    console.print(f"\n[green]✓ Merged {len(topic_merges)} duplicate topics[/green]\n")
+            else:
+                console.print("  No duplicate topics found\n")
+
+            # Show near-misses if semantic matching is enabled
+            if topic_skips:
+                console.print(f"\n[yellow]Skipped {len(topic_skips)} near-misses (high similarity but semantically different):[/yellow]")
+                for t1, t2, sim, reason in topic_skips:
+                    console.print(f"  • '{t1['name']}' ≠ '{t2['name']}'")
+                    console.print(f"    Similarity: {sim:.2f}, Reason: {reason}")
+                console.print()
+
+            # Deduplicate core loops
+            console.print("[bold]Deduplicating Core Loops...[/bold]")
+            core_loops = db.get_core_loops_by_course(course_code)
+            loop_merges = []
+            loop_skips = []
+
+            for i, loop1 in enumerate(core_loops):
+                for loop2 in core_loops[i+1:]:
+                    if use_semantic and semantic_matcher:
+                        result = semantic_matcher.should_merge(
+                            loop1['name'], loop2['name'], threshold
+                        )
+                        if result.should_merge:
+                            loop_merges.append((loop1, loop2, result.similarity_score, result.reason))
+                        elif Config.SEMANTIC_LOG_NEAR_MISSES and result.similarity_score >= 0.80:
+                            loop_skips.append((loop1, loop2, result.similarity_score, result.reason))
+                    else:
+                        similarity = SequenceMatcher(None, loop1['name'].lower(), loop2['name'].lower()).ratio()
+                        if similarity >= threshold:
+                            loop_merges.append((loop1, loop2, similarity, "string_similarity"))
+
+            if loop_merges:
+                console.print(f"Found {len(loop_merges)} core loop pairs to merge:\n")
+                for l1, l2, sim, reason in loop_merges:
+                    console.print(f"  • '{l1['name']}' ← '{l2['name']}'")
+                    console.print(f"    Similarity: {sim:.2f}, Reason: {reason}")
+
+                if not dry_run:
+                    for l1, l2, sim, reason in loop_merges:
+                        # Update exercise_core_loops junction table
+                        db.conn.execute("""
+                            UPDATE exercise_core_loops
+                            SET core_loop_id = ?
+                            WHERE core_loop_id = ?
+                        """, (l1['id'], l2['id']))
+
+                        # Update legacy core_loop_id in exercises
+                        db.conn.execute("""
+                            UPDATE exercises
+                            SET core_loop_id = ?
+                            WHERE core_loop_id = ?
+                        """, (l1['id'], l2['id']))
+
+                        # Delete duplicate core loop
+                        db.conn.execute("DELETE FROM core_loops WHERE id = ?", (l2['id'],))
+
+                    db.conn.commit()
+                    console.print(f"\n[green]✓ Merged {len(loop_merges)} duplicate core loops[/green]\n")
+            else:
+                console.print("  No duplicate core loops found\n")
+
+            # Show near-misses if semantic matching is enabled
+            if loop_skips:
+                console.print(f"\n[yellow]Skipped {len(loop_skips)} near-misses (high similarity but semantically different):[/yellow]")
+                for l1, l2, sim, reason in loop_skips:
+                    console.print(f"  • '{l1['name']}' ≠ '{l2['name']}'")
+                    console.print(f"    Similarity: {sim:.2f}, Reason: {reason}")
+                console.print()
+
+            if not dry_run and (topic_merges or loop_merges):
+                console.print("[green]Deduplication complete![/green]\n")
+            elif dry_run:
+                console.print("[yellow]Dry run complete. Use without --dry-run to apply changes.[/yellow]\n")
+            else:
+                console.print("[green]No duplicates found![/green]\n")
 
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {e}\n")

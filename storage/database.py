@@ -257,6 +257,73 @@ class Database:
 
             print(f"[INFO] Migration completed: {unanalyzed_count} exercises marked as analyzed")
 
+        # Multi-core-loop migration: Create exercise_core_loops table
+        cursor = self.conn.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='exercise_core_loops'
+        """)
+        if not cursor.fetchone():
+            print("[INFO] Running migration: Creating exercise_core_loops junction table")
+            self.conn.execute("""
+                CREATE TABLE exercise_core_loops (
+                    exercise_id TEXT NOT NULL,
+                    core_loop_id TEXT NOT NULL,
+                    step_number INTEGER,
+                    PRIMARY KEY (exercise_id, core_loop_id),
+                    FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE,
+                    FOREIGN KEY (core_loop_id) REFERENCES core_loops(id) ON DELETE CASCADE
+                )
+            """)
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_exercise_core_loops_exercise
+                ON exercise_core_loops(exercise_id)
+            """)
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_exercise_core_loops_core_loop
+                ON exercise_core_loops(core_loop_id)
+            """)
+            print("[INFO] Migration completed: exercise_core_loops table created")
+
+        # Multi-core-loop migration: Add tags column to exercises
+        cursor = self.conn.execute("PRAGMA table_info(exercises)")
+        columns = [row[1] for row in cursor.fetchall()]
+
+        if 'tags' not in columns:
+            print("[INFO] Running migration: Adding tags column to exercises table")
+            self.conn.execute("""
+                ALTER TABLE exercises
+                ADD COLUMN tags TEXT
+            """)
+            print("[INFO] Migration completed: tags column added")
+
+        # Multi-core-loop migration: Migrate existing core_loop_id data to exercise_core_loops
+        # Check if migration is needed (exercise_core_loops exists but might be empty)
+        cursor = self.conn.execute("""
+            SELECT COUNT(*) FROM exercises
+            WHERE core_loop_id IS NOT NULL
+        """)
+        exercises_with_core_loop = cursor.fetchone()[0]
+
+        cursor = self.conn.execute("SELECT COUNT(*) FROM exercise_core_loops")
+        junction_entries = cursor.fetchone()[0]
+
+        if exercises_with_core_loop > 0 and junction_entries == 0:
+            print(f"[INFO] Running migration: Migrating {exercises_with_core_loop} exercise core_loop_id references to exercise_core_loops table")
+
+            # Insert all existing core_loop_id relationships into junction table
+            self.conn.execute("""
+                INSERT INTO exercise_core_loops (exercise_id, core_loop_id, step_number)
+                SELECT id, core_loop_id, NULL
+                FROM exercises
+                WHERE core_loop_id IS NOT NULL
+            """)
+
+            cursor = self.conn.execute("SELECT COUNT(*) FROM exercise_core_loops")
+            migrated_count = cursor.fetchone()[0]
+
+            print(f"[INFO] Migration completed: {migrated_count} relationships migrated to exercise_core_loops")
+            print("[INFO] Note: exercises.core_loop_id column retained for backward compatibility")
+
     def _create_tables(self):
         """Create all database tables."""
 
@@ -322,6 +389,7 @@ class Database:
                 analyzed BOOLEAN DEFAULT 0,
                 analysis_metadata TEXT,
                 low_confidence_skipped BOOLEAN DEFAULT 0,
+                tags TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (course_code) REFERENCES courses(code),
                 FOREIGN KEY (topic_id) REFERENCES topics(id),
@@ -438,6 +506,18 @@ class Database:
             )
         """)
 
+        # Exercise-CoreLoop junction table (many-to-many)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS exercise_core_loops (
+                exercise_id TEXT NOT NULL,
+                core_loop_id TEXT NOT NULL,
+                step_number INTEGER,
+                PRIMARY KEY (exercise_id, core_loop_id),
+                FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE CASCADE,
+                FOREIGN KEY (core_loop_id) REFERENCES core_loops(id) ON DELETE CASCADE
+            )
+        """)
+
     def _create_indexes(self):
         """Create database indexes for performance."""
         indexes = [
@@ -454,6 +534,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_exercise_reviews_course ON exercise_reviews(course_code)",
             "CREATE INDEX IF NOT EXISTS idx_exercise_reviews_next_review ON exercise_reviews(next_review_date)",
             "CREATE INDEX IF NOT EXISTS idx_topic_mastery_course ON topic_mastery(course_code)",
+            "CREATE INDEX IF NOT EXISTS idx_exercise_core_loops_exercise ON exercise_core_loops(exercise_id)",
+            "CREATE INDEX IF NOT EXISTS idx_exercise_core_loops_core_loop ON exercise_core_loops(core_loop_id)",
         ]
 
         for index_sql in indexes:
@@ -571,6 +653,21 @@ class Database:
             results.append(result)
         return results
 
+    def get_core_loops_by_course(self, course_code: str) -> List[Dict[str, Any]]:
+        """Get all core loops for a course."""
+        cursor = self.conn.execute("""
+            SELECT cl.* FROM core_loops cl
+            JOIN topics t ON cl.topic_id = t.id
+            WHERE t.course_code = ?
+            ORDER BY cl.name
+        """, (course_code,))
+        results = []
+        for row in cursor.fetchall():
+            result = dict(row)
+            result['procedure'] = json.loads(result['procedure'])
+            results.append(result)
+        return results
+
     def update_core_loop_stats(self, loop_id: str):
         """Update exercise count and average difficulty for a core loop."""
         cursor = self.conn.execute("""
@@ -644,12 +741,23 @@ class Database:
         return None
 
     def get_exercises_by_core_loop(self, core_loop_id: str) -> List[Dict[str, Any]]:
-        """Get all exercises for a core loop."""
-        cursor = self.conn.execute("""
-            SELECT * FROM exercises
-            WHERE core_loop_id = ?
-            ORDER BY created_at
-        """, (core_loop_id,))
+        """Get all exercises that include this core loop.
+
+        Uses the junction table for many-to-many relationships.
+        For backward compatibility, also checks the legacy core_loop_id column.
+        """
+        # Check if created_at column exists for ordering
+        cursor = self.conn.execute("PRAGMA table_info(exercises)")
+        columns = [row[1] for row in cursor.fetchall()]
+        order_by = "e.created_at" if 'created_at' in columns else "e.id"
+
+        cursor = self.conn.execute(f"""
+            SELECT DISTINCT e.*, ecl.step_number
+            FROM exercises e
+            LEFT JOIN exercise_core_loops ecl ON e.id = ecl.exercise_id
+            WHERE ecl.core_loop_id = ? OR e.core_loop_id = ?
+            ORDER BY {order_by}
+        """, (core_loop_id, core_loop_id))
 
         results = []
         for row in cursor.fetchall():
@@ -1042,3 +1150,143 @@ class Database:
 
         # Update topic mastery
         self.update_topic_mastery(topic_id, course_code, exercises_total, exercises_mastered)
+
+    # Multi-core-loop operations
+    def link_exercise_to_core_loop(self, exercise_id: str, core_loop_id: str, step_number: Optional[int] = None) -> None:
+        """Link exercise to a core loop (allows many-to-many).
+
+        Args:
+            exercise_id: Exercise ID
+            core_loop_id: Core loop ID
+            step_number: Optional step number indicating which point in exercise (1, 2, 3, etc)
+        """
+        self.conn.execute("""
+            INSERT OR REPLACE INTO exercise_core_loops
+            (exercise_id, core_loop_id, step_number)
+            VALUES (?, ?, ?)
+        """, (exercise_id, core_loop_id, step_number))
+
+    def get_exercise_core_loops(self, exercise_id: str) -> List[Dict]:
+        """Get all core loops for an exercise.
+
+        Args:
+            exercise_id: Exercise ID
+
+        Returns:
+            List of core loop dictionaries with step_number included
+        """
+        cursor = self.conn.execute("""
+            SELECT cl.*, ecl.step_number
+            FROM core_loops cl
+            JOIN exercise_core_loops ecl ON cl.id = ecl.core_loop_id
+            WHERE ecl.exercise_id = ?
+            ORDER BY ecl.step_number, cl.name
+        """, (exercise_id,))
+
+        results = []
+        for row in cursor.fetchall():
+            result = dict(row)
+            result['procedure'] = json.loads(result['procedure'])
+            results.append(result)
+        return results
+
+    def get_exercises_with_multiple_procedures(self, course_code: str) -> List[Dict]:
+        """Get exercises that cover multiple core loops.
+
+        Args:
+            course_code: Course code to filter by
+
+        Returns:
+            List of exercise dictionaries with a 'core_loop_count' field
+        """
+        # Check if created_at column exists for ordering
+        cursor = self.conn.execute("PRAGMA table_info(exercises)")
+        columns = [row[1] for row in cursor.fetchall()]
+        order_by = "e.created_at" if 'created_at' in columns else "e.id"
+
+        cursor = self.conn.execute(f"""
+            SELECT e.*, COUNT(ecl.core_loop_id) as core_loop_count
+            FROM exercises e
+            JOIN exercise_core_loops ecl ON e.id = ecl.exercise_id
+            WHERE e.course_code = ?
+            GROUP BY e.id
+            HAVING core_loop_count > 1
+            ORDER BY core_loop_count DESC, {order_by}
+        """, (course_code,))
+
+        results = []
+        for row in cursor.fetchall():
+            result = dict(row)
+            # Parse JSON fields
+            if result.get('image_paths'):
+                result['image_paths'] = json.loads(result['image_paths'])
+            if result.get('variations'):
+                result['variations'] = json.loads(result['variations'])
+            if result.get('analysis_metadata'):
+                result['analysis_metadata'] = json.loads(result['analysis_metadata'])
+            results.append(result)
+        return results
+
+    def update_exercise_tags(self, exercise_id: str, tags: List[str]):
+        """Update tags for an exercise.
+
+        Args:
+            exercise_id: Exercise ID
+            tags: List of tag strings
+        """
+        tags_json = json.dumps(tags) if tags else None
+        self.conn.execute("""
+            UPDATE exercises
+            SET tags = ?
+            WHERE id = ?
+        """, (tags_json, exercise_id))
+
+    def update_exercise_analysis(self, exercise_id: str, topic_id: Optional[int] = None,
+                                 core_loop_id: Optional[str] = None,
+                                 difficulty: Optional[str] = None,
+                                 variations: Optional[List[str]] = None,
+                                 analysis_metadata: Optional[Dict[str, Any]] = None,
+                                 analyzed: bool = True,
+                                 low_confidence_skipped: bool = False):
+        """Update exercise with analysis results.
+
+        Args:
+            exercise_id: Exercise ID
+            topic_id: Topic ID (optional)
+            core_loop_id: Primary core loop ID (optional, for backward compatibility)
+            difficulty: Difficulty level (optional)
+            variations: List of variations (optional)
+            analysis_metadata: Additional metadata (optional)
+            analyzed: Mark as analyzed
+            low_confidence_skipped: Mark as skipped due to low confidence
+        """
+        updates = ["analyzed = ?"]
+        params = [1 if analyzed else 0]
+
+        if topic_id is not None:
+            updates.append("topic_id = ?")
+            params.append(topic_id)
+
+        if core_loop_id is not None:
+            updates.append("core_loop_id = ?")
+            params.append(core_loop_id)
+
+        if difficulty is not None:
+            updates.append("difficulty = ?")
+            params.append(difficulty)
+
+        if variations is not None:
+            updates.append("variations = ?")
+            params.append(json.dumps(variations))
+
+        if analysis_metadata is not None:
+            updates.append("analysis_metadata = ?")
+            params.append(json.dumps(analysis_metadata))
+
+        if low_confidence_skipped:
+            updates.append("low_confidence_skipped = ?")
+            params.append(1)
+
+        query = f"UPDATE exercises SET {', '.join(updates)} WHERE id = ?"
+        params.append(exercise_id)
+        self.conn.execute(query, params)

@@ -1,0 +1,195 @@
+{
+  "description": "Example LLM response for multi-procedure exercise analysis",
+  "examples": [
+    {
+      "scenario": "Single-procedure exercise (old style still works)",
+      "exercise_text": "Design a Mealy machine that detects the sequence '101' in binary input.",
+      "llm_response": {
+        "is_valid_exercise": true,
+        "is_fragment": false,
+        "should_merge_with_previous": false,
+        "topic": "Sequential Circuits",
+        "difficulty": "medium",
+        "variations": ["Sequence detector", "Binary input"],
+        "confidence": 0.9,
+        "procedures": [
+          {
+            "name": "Mealy Machine Design",
+            "type": "design",
+            "steps": [
+              "Define states based on sequence progress",
+              "Define transition function (δ: S × I → S)",
+              "Define output function (λ: S × I → O)",
+              "Draw state diagram",
+              "Verify with example inputs"
+            ],
+            "point_number": null,
+            "transformation": null
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "Multi-procedure exercise with numbered points",
+      "exercise_text": "Given a Mealy machine:\n1. Convert it to an equivalent Moore machine\n2. Minimize the resulting Moore machine\n3. Verify equivalence with the original",
+      "llm_response": {
+        "is_valid_exercise": true,
+        "is_fragment": false,
+        "should_merge_with_previous": false,
+        "topic": "Sequential Circuits",
+        "difficulty": "hard",
+        "variations": ["Machine conversion", "State minimization"],
+        "confidence": 0.95,
+        "procedures": [
+          {
+            "name": "Mealy to Moore Conversion",
+            "type": "transformation",
+            "steps": [
+              "Create Moore states (S × O)",
+              "Define Moore transition function",
+              "Define Moore output function",
+              "Draw Moore state diagram"
+            ],
+            "point_number": 1,
+            "transformation": {
+              "source_format": "Mealy Machine",
+              "target_format": "Moore Machine"
+            }
+          },
+          {
+            "name": "Moore Machine Minimization",
+            "type": "minimization",
+            "steps": [
+              "Partition states by output",
+              "Refine partitions based on transitions",
+              "Repeat until no further refinement",
+              "Merge equivalent states"
+            ],
+            "point_number": 2,
+            "transformation": null
+          },
+          {
+            "name": "FSM Equivalence Verification",
+            "type": "verification",
+            "steps": [
+              "Test with sample input sequences",
+              "Compare outputs step-by-step",
+              "Verify all states are reachable",
+              "Confirm identical behavior"
+            ],
+            "point_number": 3,
+            "transformation": null
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "Boolean algebra transformation exercise",
+      "exercise_text": "Given F = Σ(0,2,5,7), convert to POS form and minimize.",
+      "llm_response": {
+        "is_valid_exercise": true,
+        "is_fragment": false,
+        "should_merge_with_previous": false,
+        "topic": "Boolean Algebra",
+        "difficulty": "medium",
+        "variations": ["SOP to POS", "Minimization"],
+        "confidence": 0.88,
+        "procedures": [
+          {
+            "name": "SOP to POS Conversion",
+            "type": "transformation",
+            "steps": [
+              "Identify maxterms (complement of minterms)",
+              "Write product of maxterms",
+              "Convert to product notation"
+            ],
+            "point_number": null,
+            "transformation": {
+              "source_format": "SOP (Sum of Products)",
+              "target_format": "POS (Product of Sums)"
+            }
+          },
+          {
+            "name": "Karnaugh Map Minimization",
+            "type": "minimization",
+            "steps": [
+              "Draw K-map for POS",
+              "Group zeros (for POS)",
+              "Write minimal POS expression"
+            ],
+            "point_number": null,
+            "transformation": null
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "Complex multi-step combinational circuit design",
+      "exercise_text": "Design a 4-bit comparator:\n1. Write truth table\n2. Derive Boolean expressions\n3. Draw logic circuit\n4. Optimize using K-maps",
+      "llm_response": {
+        "is_valid_exercise": true,
+        "is_fragment": false,
+        "should_merge_with_previous": false,
+        "topic": "Combinational Circuits",
+        "difficulty": "hard",
+        "variations": ["Comparator design", "4-bit"],
+        "confidence": 0.92,
+        "procedures": [
+          {
+            "name": "Truth Table Construction",
+            "type": "design",
+            "steps": [
+              "List all input combinations (2^8 for 4-bit)",
+              "Define outputs (A>B, A=B, A<B)",
+              "Fill truth table values"
+            ],
+            "point_number": 1,
+            "transformation": null
+          },
+          {
+            "name": "Boolean Expression Derivation",
+            "type": "analysis",
+            "steps": [
+              "Write SOP for each output",
+              "Identify minterms",
+              "Express in canonical form"
+            ],
+            "point_number": 2,
+            "transformation": null
+          },
+          {
+            "name": "Logic Circuit Design",
+            "type": "design",
+            "steps": [
+              "Identify required gates",
+              "Draw circuit schematic",
+              "Label inputs/outputs"
+            ],
+            "point_number": 3,
+            "transformation": null
+          },
+          {
+            "name": "Karnaugh Map Optimization",
+            "type": "minimization",
+            "steps": [
+              "Create K-maps for each output",
+              "Group terms optimally",
+              "Write minimal expressions",
+              "Redraw optimized circuit"
+            ],
+            "point_number": 4,
+            "transformation": null
+          }
+        ]
+      }
+    }
+  ],
+  "notes": [
+    "The 'procedures' array can contain 1 or more procedures",
+    "Each procedure has a 'type' field: design, transformation, verification, minimization, analysis, or other",
+    "The 'point_number' field indicates which numbered point (1, 2, 3, etc.) the procedure belongs to",
+    "The 'transformation' field is only present when type='transformation'",
+    "For backward compatibility, the first procedure is considered the PRIMARY procedure",
+    "Tags are automatically generated from procedure types and transformations"
+  ]
+}

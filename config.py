@@ -53,8 +53,13 @@ class Config:
 
     # Analysis Settings
     MIN_EXERCISES_FOR_CORE_LOOP = 2  # Minimum exercises to establish a core loop
-    CORE_LOOP_SIMILARITY_THRESHOLD = 0.85  # Similarity threshold for merging core loops
+    CORE_LOOP_SIMILARITY_THRESHOLD = 0.85  # Similarity threshold for merging core loops (string-based)
     MIN_ANALYSIS_CONFIDENCE = float(os.getenv("EXAMINA_MIN_CONFIDENCE", "0.5"))  # Minimum confidence for analysis results
+
+    # Semantic Similarity Settings (NEW)
+    SEMANTIC_SIMILARITY_ENABLED = os.getenv("EXAMINA_SEMANTIC_ENABLED", "true").lower() == "true"  # Enable semantic matching
+    SEMANTIC_SIMILARITY_THRESHOLD = float(os.getenv("EXAMINA_SEMANTIC_THRESHOLD", "0.85"))  # Threshold for semantic similarity
+    SEMANTIC_LOG_NEAR_MISSES = os.getenv("EXAMINA_LOG_NEAR_MISSES", "true").lower() == "true"  # Log items with high similarity but semantic difference
 
     # Supported languages
     SUPPORTED_LANGUAGES = ["it", "en"]  # Italian and English

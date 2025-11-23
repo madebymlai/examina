@@ -420,3 +420,106 @@ class ProgressAnalytics:
                 'next_review': progress['next_review'],
                 'review_interval': progress['review_interval']
             }
+
+    def calculate_topic_mastery(self, topic_id: int, user_id: Optional[str] = None) -> float:
+        """Calculate mastery score for a topic based on quiz performance.
+
+        Uses quiz attempts and SM-2 data to compute a weighted mastery score.
+
+        Args:
+            topic_id: Topic ID
+            user_id: User ID (reserved for future multi-user support)
+
+        Returns:
+            Mastery score between 0.0 and 1.0
+        """
+        with Database() as db:
+            # Get all core loops for this topic
+            core_loops = db.get_core_loops_by_topic(topic_id)
+
+            if not core_loops:
+                return 0.0
+
+            # Calculate average mastery across all core loops
+            total_mastery = 0.0
+            loops_with_progress = 0
+
+            for loop in core_loops:
+                loop_id = loop['id']
+
+                # Get student progress for this core loop
+                progress = db.conn.execute("""
+                    SELECT mastery_score, total_attempts
+                    FROM student_progress
+                    WHERE core_loop_id = ?
+                """, (loop_id,)).fetchone()
+
+                if progress and progress[1] > 0:  # Has attempts
+                    total_mastery += progress[0]
+                    loops_with_progress += 1
+
+            if loops_with_progress == 0:
+                return 0.0
+
+            return total_mastery / loops_with_progress
+
+    def get_quiz_performance_data(self, course_code: str, core_loop_id: Optional[str] = None,
+                                  user_id: Optional[str] = None) -> Dict[str, Any]:
+        """Get quiz performance data for adaptive decisions.
+
+        Args:
+            course_code: Course code
+            core_loop_id: Optional core loop ID to filter by
+            user_id: User ID (reserved for future)
+
+        Returns:
+            Dictionary with performance metrics
+        """
+        with Database() as db:
+            # Build query based on filters
+            if core_loop_id:
+                query = """
+                    SELECT
+                        COUNT(*) as total_attempts,
+                        SUM(CASE WHEN qa.correct = 1 THEN 1 ELSE 0 END) as correct_count,
+                        AVG(CASE WHEN qa.correct = 1 THEN 1.0 ELSE 0.0 END) as accuracy,
+                        AVG(qa.time_taken_seconds) as avg_time_seconds,
+                        MAX(qa.attempted_at) as last_attempt
+                    FROM quiz_attempts qa
+                    JOIN quiz_sessions qs ON qa.session_id = qs.id
+                    JOIN exercises e ON qa.exercise_id = e.id
+                    WHERE qs.course_code = ? AND e.core_loop_id = ?
+                """
+                params = (course_code, core_loop_id)
+            else:
+                query = """
+                    SELECT
+                        COUNT(*) as total_attempts,
+                        SUM(CASE WHEN qa.correct = 1 THEN 1 ELSE 0 END) as correct_count,
+                        AVG(CASE WHEN qa.correct = 1 THEN 1.0 ELSE 0.0 END) as accuracy,
+                        AVG(qa.time_taken_seconds) as avg_time_seconds,
+                        MAX(qa.attempted_at) as last_attempt
+                    FROM quiz_attempts qa
+                    JOIN quiz_sessions qs ON qa.session_id = qs.id
+                    WHERE qs.course_code = ?
+                """
+                params = (course_code,)
+
+            result = db.conn.execute(query, params).fetchone()
+
+            if not result or result[0] == 0:
+                return {
+                    'total_attempts': 0,
+                    'correct_count': 0,
+                    'accuracy': 0.0,
+                    'avg_time_seconds': 0,
+                    'last_attempt': None
+                }
+
+            return {
+                'total_attempts': result[0],
+                'correct_count': result[1],
+                'accuracy': result[2] or 0.0,
+                'avg_time_seconds': result[3] or 0,
+                'last_attempt': result[4]
+            }

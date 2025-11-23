@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from models.llm_manager import LLMManager
 from storage.database import Database
 from config import Config
+from core.concept_explainer import ConceptExplainer
+from core.study_strategies import StudyStrategyManager
 
 
 @dataclass
@@ -32,13 +34,24 @@ class Tutor:
         """
         self.llm = llm_manager or LLMManager(provider="anthropic")
         self.language = language
+        self.concept_explainer = ConceptExplainer(llm_manager=self.llm, language=language)
+        self.strategy_manager = StudyStrategyManager(language=language)
 
-    def learn(self, course_code: str, core_loop_id: str) -> TutorResponse:
+    def learn(self, course_code: str,
+              core_loop_id: str,
+              explain_concepts: bool = True,
+              depth: str = "medium",
+              adaptive: bool = True,
+              include_study_strategy: bool = False) -> TutorResponse:
         """Explain a core loop with theory and procedure.
 
         Args:
             course_code: Course code
             core_loop_id: Core loop ID to learn
+            explain_concepts: Whether to include prerequisite concepts (default: True)
+            depth: Explanation depth - basic, medium, advanced (default: medium)
+            adaptive: Enable adaptive teaching (auto-select depth and prerequisites based on mastery)
+            include_study_strategy: Whether to include metacognitive study strategy (default: False)
 
         Returns:
             TutorResponse with explanation
@@ -62,18 +75,43 @@ class Tutor:
             exercises = db.get_exercises_by_course(course_code)
             examples = [ex for ex in exercises if ex.get('core_loop_id') == core_loop_id][:3]
 
-        # Build learning prompt
-        prompt = self._build_learn_prompt(
-            core_loop=dict(core_loop),
-            examples=examples
+        core_loop_dict = dict(core_loop)
+        core_loop_name = core_loop_dict.get('name', '')
+
+        # Adaptive teaching: Auto-select depth and prerequisites based on mastery
+        adaptive_recommendations = None
+        if adaptive:
+            from core.adaptive_teaching import AdaptiveTeachingManager
+
+            with AdaptiveTeachingManager() as atm:
+                adaptive_recommendations = atm.get_adaptive_recommendations(
+                    course_code, core_loop_name
+                )
+
+                # Override depth and explain_concepts if adaptive
+                depth = adaptive_recommendations['depth']
+                explain_concepts = adaptive_recommendations['show_prerequisites']
+
+        # Get prerequisite concepts
+        prerequisite_text = ""
+        if explain_concepts:
+            prerequisite_text = self.concept_explainer.explain_prerequisites(
+                core_loop_name, depth=depth
+            )
+
+        # Build enhanced learning prompt with deep reasoning
+        prompt = self._build_enhanced_learn_prompt(
+            core_loop=core_loop_dict,
+            examples=examples,
+            depth=depth
         )
 
-        # Call LLM
+        # Call LLM for deep explanation
         response = self.llm.generate(
             prompt=prompt,
             model=self.llm.primary_model,
             temperature=0.3,
-            max_tokens=2000
+            max_tokens=3500  # Increased for deeper explanations
         )
 
         if not response.success:
@@ -82,12 +120,41 @@ class Tutor:
                 success=False
             )
 
+        # Combine prerequisite concepts with LLM explanation
+        full_content = []
+
+        if prerequisite_text:
+            full_content.append(prerequisite_text)
+            full_content.append("\n" + "=" * 60 + "\n")
+
+        full_content.append(response.text)
+
+        # Add study strategy if requested
+        if include_study_strategy:
+            strategy = self.strategy_manager.get_strategy_for_core_loop(
+                core_loop_name,
+                difficulty=depth
+            )
+            if strategy:
+                full_content.append("\n" + "=" * 60 + "\n")
+                full_content.append(self.strategy_manager.format_strategy_output(strategy, core_loop_name))
+
+        # Add adaptive recommendations at end
+        if adaptive and adaptive_recommendations:
+            full_content.append("\n" + "=" * 60 + "\n")
+            full_content.append(self._format_adaptive_recommendations(adaptive_recommendations))
+
         return TutorResponse(
-            content=response.text,
+            content="\n".join(full_content),
             success=True,
             metadata={
                 "core_loop": core_loop_id,
-                "examples_count": len(examples)
+                "examples_count": len(examples),
+                "includes_prerequisites": explain_concepts,
+                "depth": depth,
+                "adaptive": adaptive,
+                "recommendations": adaptive_recommendations,
+                "includes_study_strategy": include_study_strategy
             }
         )
 
@@ -301,6 +368,85 @@ Make it pedagogical and clear for students learning this for the first time.
 """
         return prompt
 
+    def _build_enhanced_learn_prompt(self, core_loop: Dict[str, Any],
+                                     examples: List[Dict[str, Any]],
+                                     depth: str = "medium") -> str:
+        """Build enhanced prompt with deep WHY reasoning."""
+        language_instruction = {
+            "it": "Rispondi in ITALIANO.",
+            "en": "Respond in ENGLISH."
+        }
+
+        depth_instructions = {
+            "basic": "Keep explanations simple and concise. Focus on the core concepts.",
+            "medium": "Provide balanced explanations with WHY reasoning and practical examples.",
+            "advanced": "Give comprehensive explanations with deep reasoning, edge cases, and optimization strategies."
+        }
+
+        depth_instruction = depth_instructions.get(depth, depth_instructions["medium"])
+
+        prompt = f"""{language_instruction.get(self.language, language_instruction["en"])}
+
+You are an expert educator helping students DEEPLY understand a problem-solving procedure.
+
+TOPIC: {core_loop.get('topic_name', 'Unknown')}
+PROCEDURE: {core_loop['name']}
+EXPLANATION DEPTH: {depth}
+
+PROCEDURE STEPS:
+{self._format_procedure(core_loop.get('procedure'))}
+
+EXAMPLE EXERCISES:
+{self._format_examples(examples)}
+
+{depth_instruction}
+
+Your task is to provide a COMPREHENSIVE, PEDAGOGICAL explanation that goes beyond just listing steps:
+
+## 1. BIG PICTURE (The "What" and "Why it matters")
+- What is this procedure solving?
+- Why is this problem important?
+- When would you use this in practice?
+- What makes this approach effective?
+
+## 2. STEP-BY-STEP BREAKDOWN (The "How" with reasoning)
+For EACH step in the procedure, explain:
+- **WHAT**: What are you doing in this step?
+- **WHY**: Why is this step necessary? What problem does it solve?
+- **HOW**: How do you perform this step concretely?
+- **REASONING**: What's the underlying logic? Why does this method work?
+- **VALIDATION**: How do you know you've done it correctly?
+
+## 3. COMMON PITFALLS (Mistakes and how to avoid them)
+- What mistakes do students typically make at each step?
+- Why do these mistakes happen (what's the misconception)?
+- How can you avoid or catch these mistakes?
+- What are red flags that something went wrong?
+
+## 4. DECISION-MAKING GUIDANCE (When and how to apply)
+- When should you use this procedure (what signals/patterns)?
+- When should you NOT use it (what are limitations)?
+- How does this connect to related concepts?
+- What variations or alternatives exist?
+
+## 5. PRACTICE STRATEGY (How to master this)
+- What's the best way to practice this skill?
+- What should you focus on first?
+- How can you test your understanding?
+- What resources help deepen mastery?
+
+Use:
+- Concrete examples throughout (not just abstract descriptions)
+- Analogies to familiar concepts when helpful
+- "You" language to engage the student
+- Clear structure with headers
+- Progressive complexity (build from simple to complex)
+- Practical tips from experience
+
+Make your explanation conversational, engaging, and genuinely helpful for someone trying to learn this for the first time or deepen their understanding.
+"""
+        return prompt
+
     def _build_evaluation_prompt(self, exercise_text: str, user_answer: str,
                                  procedure: Optional[str], provide_hints: bool) -> str:
         """Build prompt for answer evaluation."""
@@ -396,3 +542,61 @@ Generate ONLY the exercise text, not the solution.
             formatted.append(f"Example {i}:\n{text}\n")
 
         return "\n".join(formatted)
+
+    def _format_adaptive_recommendations(self, recommendations: Dict[str, Any]) -> str:
+        """Format adaptive teaching recommendations.
+
+        Args:
+            recommendations: Recommendations dictionary from AdaptiveTeachingManager
+
+        Returns:
+            Formatted string with recommendations
+        """
+        language_headers = {
+            "it": {
+                "title": "📚 RACCOMANDAZIONI DI STUDIO PERSONALIZZATE",
+                "mastery": "Livello di padronanza attuale",
+                "practice": "Esercizi consigliati per la pratica",
+                "focus": "Aree su cui concentrarsi",
+                "next_review": "Prossima revisione programmata"
+            },
+            "en": {
+                "title": "📚 PERSONALIZED STUDY RECOMMENDATIONS",
+                "mastery": "Current mastery level",
+                "practice": "Recommended practice exercises",
+                "focus": "Focus areas",
+                "next_review": "Next scheduled review"
+            }
+        }
+
+        headers = language_headers.get(self.language, language_headers["en"])
+        lines = [f"\n{headers['title']}\n"]
+
+        # Current mastery
+        mastery = recommendations.get('current_mastery', 0.0)
+        mastery_pct = int(mastery * 100)
+        mastery_emoji = "🟢" if mastery >= 0.7 else "🟡" if mastery >= 0.3 else "🔴"
+        lines.append(f"{mastery_emoji} {headers['mastery']}: {mastery_pct}%")
+
+        # Practice recommendations
+        practice_count = recommendations.get('practice_count', 3)
+        lines.append(f"\n✍️  {headers['practice']}: {practice_count}")
+
+        # Focus areas
+        focus_areas = recommendations.get('focus_areas', [])
+        if focus_areas:
+            lines.append(f"\n🎯 {headers['focus']}:")
+            for area in focus_areas:
+                lines.append(f"   • {area}")
+
+        # Next review
+        next_review = recommendations.get('next_review')
+        if next_review:
+            from datetime import datetime
+            try:
+                review_date = datetime.fromisoformat(next_review)
+                lines.append(f"\n📅 {headers['next_review']}: {review_date.strftime('%Y-%m-%d')}")
+            except:
+                pass
+
+        return "\n".join(lines)

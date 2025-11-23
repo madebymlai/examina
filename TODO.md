@@ -10,11 +10,15 @@
 - ✅ Topic and core loop discovery
 
 **Future improvements (low priority):**
-- [x] Topic/core loop deduplication - Automatic similarity-based merging (0.85 threshold)
+- [x] Topic/core loop deduplication - Database-aware similarity matching + cleanup command
 - [x] Confidence threshold filtering - Filter low-confidence analyses (default 0.5)
 - [x] Resume failed analysis - Checkpoint system with --force flag
 - [x] Batch processing optimization - 7-8x speedup with parallel processing
 - [x] Caching LLM responses - File-based cache with TTL, 100% hit rate on re-runs
+- [x] Deduplicate command - Merge existing duplicates with `examina deduplicate`
+- [ ] Language-aware deduplication - Match "Finite State Machines" with "Macchine a Stati Finiti"
+- [ ] Translation dictionary for English/Italian topic matching
+- [ ] Semantic similarity instead of string similarity (use embeddings)
 - [ ] Provider-agnostic rate limiting tracker
 
 ## Phase 4 - Tutor Features ✅ COMPLETED
@@ -99,7 +103,109 @@
 **Achievement: Completed in ~4 hours using 4 parallel agents (vs. estimated 35-45 hours)**
 **Performance gain: 9-11x faster than sequential implementation!**
 
+## Phase 6 - Multi-Core-Loop Support 🚧 IN PROGRESS
+
+**Goal:** Extract ALL procedures from multi-step exercises (e.g., "1. Design Mealy, 2. Transform to Moore, 3. Minimize")
+
+**Implemented using 3 parallel agents:**
+
+### 6.1 Database Schema ✅ COMPLETED
+- ✅ Created `exercise_core_loops` junction table (many-to-many relationship)
+- ✅ Added `tags` column to exercises for flexible search
+- ✅ Implemented automatic migration from legacy `core_loop_id` column
+- ✅ Added 4 new Database helper methods:
+  - `link_exercise_to_core_loop()` - Link exercise to multiple core loops
+  - `get_exercise_core_loops()` - Get all core loops for an exercise
+  - `get_exercises_by_core_loop()` - Updated to use junction table
+  - `get_exercises_with_multiple_procedures()` - Find multi-step exercises
+- ✅ Full backward compatibility with existing code
+
+### 6.2 Detection Logic ✅ COMPLETED
+- ✅ Created `core/detection_utils.py` (455 lines)
+- ✅ Implemented `detect_numbered_points()` - 8 pattern types (numeric, letters, Roman, Italian)
+- ✅ Implemented `detect_transformation_keywords()` - 15 transformation patterns (English + Italian)
+- ✅ Implemented `classify_procedure_type()` - 6 categories (design, transformation, verification, minimization, analysis, implementation)
+- ✅ Bilingual support (English/Italian)
+- ✅ Confidence scoring for fuzzy matches
+- ✅ 33 unit tests (100% pass rate)
+
+### 6.3 Analyzer Updates ✅ COMPLETED
+- ✅ Updated LLM prompt to extract ALL procedures per exercise
+- ✅ Added multi-procedure JSON response format
+- ✅ Implemented procedure-specific transformation detection
+- ✅ Added automatic tag generation (e.g., `transform_mealy_to_moore`)
+- ✅ Updated result processing to link exercises to multiple core loops
+- ✅ Full backward compatibility with old single-procedure format
+- ✅ Test suite with 5 test cases (100% pass)
+
+### 6.4 Quiz & Search Updates 🔜 TODO
+- [ ] Update quiz selection queries to use junction table
+- [ ] Add `--procedure` filter flag to quiz command
+- [ ] Update `info` command to show all procedures per exercise
+- [ ] Add search by tags functionality
+
+### 6.5 Testing & Validation 🔜 TODO
+- [ ] Re-analyze B006802 (ADE) exercises with multi-procedure extraction
+- [ ] Verify Exercise 1 from 2024-01-29 now maps to "Mealy→Moore Transformation"
+- [ ] Test quiz filtering by procedure type
+- [ ] Validate tag-based search
+
+### 6.6 Documentation ✅ COMPLETED
+- ✅ Created `MULTI_PROCEDURE_IMPLEMENTATION_SUMMARY.md`
+- ✅ Created `MULTI_PROCEDURE_ARCHITECTURE.md`
+- ✅ Created example LLM responses (`example_multi_procedure_llm_response.json`)
+- [ ] Update README.md with Phase 6 features
+
+**Status:** Core implementation complete (6.1-6.3), CLI/testing remaining (6.4-6.5)
+
+## Phase 7 - Enhanced Learning System 🚧 IN PROGRESS
+
+**Problem:** Current `learn` command assumes prior knowledge and doesn't deeply explain WHY and HOW.
+
+**Goal:** Create a comprehensive teaching system that:
+- Explains foundational concepts (doesn't assume prior knowledge)
+- Provides detailed reasoning for each algorithm step
+- Teaches metacognitive strategies (how to learn effectively)
+- Adapts explanations to student's understanding level
+
+### 7.1 Deep Theory Explanations ✅ COMPLETED
+- [x] Created `core/concept_explainer.py` module
+- [x] Added prerequisite concepts detection (CONCEPT_HIERARCHY mapping)
+- [x] Implemented concept explanations with examples, analogies, and misconceptions
+- [x] Added foundational theory before procedures
+- [x] Implemented progressive complexity (basic/medium/advanced depth levels)
+- [x] Enhanced Tutor.learn() to include prerequisite concepts
+- [x] Updated CLI with --depth and --no-concepts flags
+
+**Features:**
+- Prerequisite concept system for FSM, Linear Algebra, and Concurrent Programming topics
+- Detailed concept explanations with analogies and common misconceptions
+- Three depth levels: basic (concise), medium (balanced), advanced (comprehensive)
+- Automatic prerequisite injection before procedural explanations
+
+### 7.2 Step-by-Step Reasoning ✅ PARTIALLY COMPLETE
+- [x] Enhanced procedure explanations with WHY for each step
+- [x] Added common mistakes and how to avoid them
+- [x] Included decision-making logic ("when to use this technique")
+- [x] Created 5-section explanation structure (Big Picture, Step-by-Step, Pitfalls, Decision-Making, Practice Strategy)
+- [ ] Provide worked examples with detailed reasoning (LLM-generated per request)
+- [ ] Interactive questioning to check understanding (future enhancement)
+
+### 7.3 Metacognitive Learning Strategies 🔜 TODO
+- [ ] Create study strategies module
+- [ ] Add learning tips per topic/difficulty
+- [ ] Teach problem-solving frameworks
+- [ ] Include self-assessment prompts
+- [ ] Provide retrieval practice suggestions
+
+### 7.4 Adaptive Teaching 🔜 TODO
+- [ ] Track student's understanding level per topic
+- [ ] Adjust explanation depth based on mastery
+- [ ] Detect knowledge gaps and fill them proactively
+- [ ] Recommend personalized learning paths
+
 ## Known Issues
 - Groq free tier rate limit (30 req/min) prevents analyzing large courses in one run
 - Splitter may over-split on some edge cases (needs more real-world testing)
-- Topics can be duplicated with slight variations in naming
+- API timeouts with long prompts (enhanced learn with prerequisites may timeout - use --no-concepts flag)
+- Deduplication may occasionally merge semantically different items with similar names (e.g., "Mealy Machine" vs "Moore Machine" have 0.92 similarity)
