@@ -75,6 +75,169 @@ class Database:
             """)
             print("[INFO] Migration completed successfully")
 
+        # Phase 5: Create exercise_reviews table if it doesn't exist
+        cursor = self.conn.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='exercise_reviews'
+        """)
+        if not cursor.fetchone():
+            print("[INFO] Running migration: Creating exercise_reviews table for spaced repetition")
+            self.conn.execute("""
+                CREATE TABLE exercise_reviews (
+                    exercise_id TEXT PRIMARY KEY,
+                    course_code TEXT NOT NULL,
+                    easiness_factor REAL DEFAULT 2.5,
+                    repetition_number INTEGER DEFAULT 0,
+                    interval_days INTEGER DEFAULT 0,
+                    next_review_date DATE,
+                    last_reviewed_at TIMESTAMP,
+                    total_reviews INTEGER DEFAULT 0,
+                    correct_reviews INTEGER DEFAULT 0,
+                    mastery_level TEXT DEFAULT 'new',
+                    FOREIGN KEY (exercise_id) REFERENCES exercises(id),
+                    FOREIGN KEY (course_code) REFERENCES courses(code)
+                )
+            """)
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_exercise_reviews_course
+                ON exercise_reviews(course_code)
+            """)
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_exercise_reviews_next_review
+                ON exercise_reviews(next_review_date)
+            """)
+            print("[INFO] Migration completed: exercise_reviews table created")
+
+        # Phase 5: Create topic_mastery table if it doesn't exist
+        cursor = self.conn.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='topic_mastery'
+        """)
+        if not cursor.fetchone():
+            print("[INFO] Running migration: Creating topic_mastery table for progress tracking")
+            self.conn.execute("""
+                CREATE TABLE topic_mastery (
+                    topic_id INTEGER PRIMARY KEY,
+                    course_code TEXT NOT NULL,
+                    exercises_total INTEGER DEFAULT 0,
+                    exercises_mastered INTEGER DEFAULT 0,
+                    mastery_percentage REAL DEFAULT 0.0,
+                    last_practiced_at TIMESTAMP,
+                    FOREIGN KEY (topic_id) REFERENCES topics(id),
+                    FOREIGN KEY (course_code) REFERENCES courses(code)
+                )
+            """)
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_topic_mastery_course
+                ON topic_mastery(course_code)
+            """)
+            print("[INFO] Migration completed: topic_mastery table created")
+
+        # Phase 5: Migrate quiz_sessions table to new schema
+        cursor = self.conn.execute("PRAGMA table_info(quiz_sessions)")
+        quiz_sessions_columns = [row[1] for row in cursor.fetchall()]
+
+        # Check if we need to migrate (old schema has 'time_limit' column)
+        if 'time_limit' in quiz_sessions_columns and 'correct_answers' not in quiz_sessions_columns:
+            print("[INFO] Running migration: Updating quiz_sessions table to Phase 5 schema")
+
+            # Create new table with Phase 5 schema
+            self.conn.execute("""
+                CREATE TABLE quiz_sessions_new (
+                    id TEXT PRIMARY KEY,
+                    course_code TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    total_questions INTEGER,
+                    correct_answers INTEGER,
+                    score_percentage REAL,
+                    quiz_type TEXT,
+                    filter_topic_id INTEGER,
+                    filter_core_loop_id TEXT,
+                    filter_difficulty TEXT,
+                    FOREIGN KEY (course_code) REFERENCES courses(code),
+                    FOREIGN KEY (filter_topic_id) REFERENCES topics(id)
+                )
+            """)
+
+            # Migrate existing data
+            self.conn.execute("""
+                INSERT INTO quiz_sessions_new
+                (id, course_code, created_at, completed_at, total_questions,
+                 correct_answers, score_percentage, quiz_type, filter_topic_id, filter_core_loop_id)
+                SELECT
+                    id, course_code, started_at, completed_at, total_questions,
+                    total_correct, score, quiz_type, topic_id, core_loop_id
+                FROM quiz_sessions
+            """)
+
+            # Drop old table and rename new one
+            self.conn.execute("DROP TABLE quiz_sessions")
+            self.conn.execute("ALTER TABLE quiz_sessions_new RENAME TO quiz_sessions")
+
+            # Recreate index
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_quiz_sessions_course
+                ON quiz_sessions(course_code)
+            """)
+            print("[INFO] Migration completed: quiz_sessions table updated")
+
+        # Phase 5: Migrate quiz_answers table to quiz_attempts
+        cursor = self.conn.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='quiz_answers'
+        """)
+        if cursor.fetchone():
+            cursor = self.conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='quiz_attempts'
+            """)
+            if not cursor.fetchone():
+                print("[INFO] Running migration: Migrating quiz_answers to quiz_attempts table")
+
+                # Create new quiz_attempts table
+                self.conn.execute("""
+                    CREATE TABLE quiz_attempts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        exercise_id TEXT NOT NULL,
+                        user_answer TEXT,
+                        correct BOOLEAN,
+                        time_taken_seconds INTEGER,
+                        hint_used BOOLEAN DEFAULT 0,
+                        feedback TEXT,
+                        attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (session_id) REFERENCES quiz_sessions(id),
+                        FOREIGN KEY (exercise_id) REFERENCES exercises(id)
+                    )
+                """)
+
+                # Migrate existing data from quiz_answers
+                self.conn.execute("""
+                    INSERT INTO quiz_attempts
+                    (session_id, exercise_id, user_answer, correct, time_taken_seconds,
+                     hint_used, feedback, attempted_at)
+                    SELECT
+                        session_id, exercise_id, student_answer, is_correct, time_spent,
+                        hint_used, mistakes, answered_at
+                    FROM quiz_answers
+                """)
+
+                # Create index
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_quiz_attempts_session
+                    ON quiz_attempts(session_id)
+                """)
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_quiz_attempts_exercise
+                    ON quiz_attempts(exercise_id)
+                """)
+
+                # Drop old table
+                self.conn.execute("DROP TABLE quiz_answers")
+
+                print("[INFO] Migration completed: quiz_answers migrated to quiz_attempts")
+
     def _create_tables(self):
         """Create all database tables."""
 
@@ -167,44 +330,71 @@ class Database:
             )
         """)
 
-        # Quiz sessions table
+        # Quiz sessions table (Phase 5 schema)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS quiz_sessions (
                 id TEXT PRIMARY KEY,
                 course_code TEXT NOT NULL,
-                quiz_type TEXT NOT NULL,
-                topic_id INTEGER,
-                core_loop_id TEXT,
-                total_questions INTEGER,
-                time_limit INTEGER,
-                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP,
-                total_correct INTEGER DEFAULT 0,
-                score REAL,
-                time_spent INTEGER,
+                total_questions INTEGER,
+                correct_answers INTEGER,
+                score_percentage REAL,
+                quiz_type TEXT,
+                filter_topic_id INTEGER,
+                filter_core_loop_id TEXT,
+                filter_difficulty TEXT,
                 FOREIGN KEY (course_code) REFERENCES courses(code),
-                FOREIGN KEY (topic_id) REFERENCES topics(id),
-                FOREIGN KEY (core_loop_id) REFERENCES core_loops(id)
+                FOREIGN KEY (filter_topic_id) REFERENCES topics(id)
             )
         """)
 
-        # Quiz answers table
+        # Quiz attempts table (Phase 5 schema)
         self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS quiz_answers (
+            CREATE TABLE IF NOT EXISTS quiz_attempts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 exercise_id TEXT NOT NULL,
-                question_number INTEGER,
-                student_answer TEXT,
-                is_correct BOOLEAN,
-                score REAL,
-                mistakes TEXT,
+                user_answer TEXT,
+                correct BOOLEAN,
+                time_taken_seconds INTEGER,
                 hint_used BOOLEAN DEFAULT 0,
-                hints_requested INTEGER DEFAULT 0,
-                answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                time_spent INTEGER,
+                feedback TEXT,
+                attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (session_id) REFERENCES quiz_sessions(id),
                 FOREIGN KEY (exercise_id) REFERENCES exercises(id)
+            )
+        """)
+
+        # Exercise reviews table (Phase 5 - Spaced Repetition)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS exercise_reviews (
+                exercise_id TEXT PRIMARY KEY,
+                course_code TEXT NOT NULL,
+                easiness_factor REAL DEFAULT 2.5,
+                repetition_number INTEGER DEFAULT 0,
+                interval_days INTEGER DEFAULT 0,
+                next_review_date DATE,
+                last_reviewed_at TIMESTAMP,
+                total_reviews INTEGER DEFAULT 0,
+                correct_reviews INTEGER DEFAULT 0,
+                mastery_level TEXT DEFAULT 'new',
+                FOREIGN KEY (exercise_id) REFERENCES exercises(id),
+                FOREIGN KEY (course_code) REFERENCES courses(code)
+            )
+        """)
+
+        # Topic mastery table (Phase 5 - Progress Tracking)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS topic_mastery (
+                topic_id INTEGER PRIMARY KEY,
+                course_code TEXT NOT NULL,
+                exercises_total INTEGER DEFAULT 0,
+                exercises_mastered INTEGER DEFAULT 0,
+                mastery_percentage REAL DEFAULT 0.0,
+                last_practiced_at TIMESTAMP,
+                FOREIGN KEY (topic_id) REFERENCES topics(id),
+                FOREIGN KEY (course_code) REFERENCES courses(code)
             )
         """)
 
@@ -240,7 +430,11 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_progress_course ON student_progress(course_code)",
             "CREATE INDEX IF NOT EXISTS idx_progress_core_loop ON student_progress(core_loop_id)",
             "CREATE INDEX IF NOT EXISTS idx_quiz_sessions_course ON quiz_sessions(course_code)",
-            "CREATE INDEX IF NOT EXISTS idx_quiz_answers_session ON quiz_answers(session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_quiz_attempts_session ON quiz_attempts(session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_quiz_attempts_exercise ON quiz_attempts(exercise_id)",
+            "CREATE INDEX IF NOT EXISTS idx_exercise_reviews_course ON exercise_reviews(course_code)",
+            "CREATE INDEX IF NOT EXISTS idx_exercise_reviews_next_review ON exercise_reviews(next_review_date)",
+            "CREATE INDEX IF NOT EXISTS idx_topic_mastery_course ON topic_mastery(course_code)",
         ]
 
         for index_sql in indexes:
@@ -487,3 +681,345 @@ class Database:
                 result['analysis_metadata'] = json.loads(result['analysis_metadata'])
             results.append(result)
         return results
+
+    # Phase 5: Quiz Session operations
+    def create_quiz_session(self, session_id: str, course_code: str, quiz_type: str,
+                           filter_topic_id: Optional[int] = None,
+                           filter_core_loop_id: Optional[str] = None,
+                           filter_difficulty: Optional[str] = None) -> str:
+        """Create a new quiz session.
+
+        Args:
+            session_id: Unique identifier for the session
+            course_code: Course code
+            quiz_type: Type of quiz ('topic', 'core_loop', 'random', 'review')
+            filter_topic_id: Optional topic filter
+            filter_core_loop_id: Optional core loop filter
+            filter_difficulty: Optional difficulty filter
+
+        Returns:
+            Session ID
+        """
+        self.conn.execute("""
+            INSERT INTO quiz_sessions
+            (id, course_code, quiz_type, filter_topic_id, filter_core_loop_id, filter_difficulty)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (session_id, course_code, quiz_type, filter_topic_id, filter_core_loop_id, filter_difficulty))
+        return session_id
+
+    def get_quiz_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get quiz session by ID.
+
+        Args:
+            session_id: Session ID to retrieve
+
+        Returns:
+            Session dictionary or None if not found
+        """
+        cursor = self.conn.execute(
+            "SELECT * FROM quiz_sessions WHERE id = ?", (session_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def update_quiz_session(self, session_id: str, total_questions: Optional[int] = None,
+                           correct_answers: Optional[int] = None,
+                           score_percentage: Optional[float] = None,
+                           completed: bool = False):
+        """Update quiz session with results.
+
+        Args:
+            session_id: Session ID to update
+            total_questions: Total number of questions
+            correct_answers: Number of correct answers
+            score_percentage: Final score percentage
+            completed: Whether the session is completed
+        """
+        updates = []
+        params = []
+
+        if total_questions is not None:
+            updates.append("total_questions = ?")
+            params.append(total_questions)
+
+        if correct_answers is not None:
+            updates.append("correct_answers = ?")
+            params.append(correct_answers)
+
+        if score_percentage is not None:
+            updates.append("score_percentage = ?")
+            params.append(score_percentage)
+
+        if completed:
+            updates.append("completed_at = CURRENT_TIMESTAMP")
+
+        if updates:
+            query = f"UPDATE quiz_sessions SET {', '.join(updates)} WHERE id = ?"
+            params.append(session_id)
+            self.conn.execute(query, params)
+
+    def get_quiz_sessions_by_course(self, course_code: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get recent quiz sessions for a course.
+
+        Args:
+            course_code: Course code to filter by
+            limit: Maximum number of sessions to return
+
+        Returns:
+            List of session dictionaries
+        """
+        cursor = self.conn.execute("""
+            SELECT * FROM quiz_sessions
+            WHERE course_code = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (course_code, limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+    # Phase 5: Quiz Attempt operations
+    def add_quiz_attempt(self, session_id: str, exercise_id: str, user_answer: Optional[str] = None,
+                        correct: Optional[bool] = None, time_taken_seconds: Optional[int] = None,
+                        hint_used: bool = False, feedback: Optional[str] = None) -> int:
+        """Record a quiz attempt.
+
+        Args:
+            session_id: Session ID
+            exercise_id: Exercise ID
+            user_answer: User's answer
+            correct: Whether the answer was correct
+            time_taken_seconds: Time taken in seconds
+            hint_used: Whether a hint was used
+            feedback: Feedback text
+
+        Returns:
+            Attempt ID
+        """
+        cursor = self.conn.execute("""
+            INSERT INTO quiz_attempts
+            (session_id, exercise_id, user_answer, correct, time_taken_seconds, hint_used, feedback)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (session_id, exercise_id, user_answer, correct, time_taken_seconds, hint_used, feedback))
+        return cursor.lastrowid
+
+    def get_quiz_attempts(self, session_id: str) -> List[Dict[str, Any]]:
+        """Get all attempts for a quiz session.
+
+        Args:
+            session_id: Session ID
+
+        Returns:
+            List of attempt dictionaries
+        """
+        cursor = self.conn.execute("""
+            SELECT * FROM quiz_attempts
+            WHERE session_id = ?
+            ORDER BY attempted_at
+        """, (session_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_attempts_by_exercise(self, exercise_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent attempts for a specific exercise.
+
+        Args:
+            exercise_id: Exercise ID
+            limit: Maximum number of attempts to return
+
+        Returns:
+            List of attempt dictionaries
+        """
+        cursor = self.conn.execute("""
+            SELECT * FROM quiz_attempts
+            WHERE exercise_id = ?
+            ORDER BY attempted_at DESC
+            LIMIT ?
+        """, (exercise_id, limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+    # Phase 5: Exercise Review operations (Spaced Repetition)
+    def get_exercise_review(self, exercise_id: str) -> Optional[Dict[str, Any]]:
+        """Get spaced repetition data for an exercise.
+
+        Args:
+            exercise_id: Exercise ID
+
+        Returns:
+            Review data dictionary or None if not found
+        """
+        cursor = self.conn.execute(
+            "SELECT * FROM exercise_reviews WHERE exercise_id = ?", (exercise_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def update_exercise_review(self, exercise_id: str, course_code: str,
+                               easiness_factor: float, repetition_number: int,
+                               interval_days: int, next_review_date: str,
+                               mastery_level: str, correct: bool):
+        """Update spaced repetition data for an exercise.
+
+        Args:
+            exercise_id: Exercise ID
+            course_code: Course code
+            easiness_factor: SM-2 easiness factor
+            repetition_number: Number of successful repetitions
+            interval_days: Days until next review
+            next_review_date: Date of next review (YYYY-MM-DD)
+            mastery_level: Mastery level ('new', 'learning', 'mastered')
+            correct: Whether the last review was correct
+        """
+        # Check if review record exists
+        existing = self.get_exercise_review(exercise_id)
+
+        if existing:
+            # Update existing record
+            self.conn.execute("""
+                UPDATE exercise_reviews
+                SET easiness_factor = ?,
+                    repetition_number = ?,
+                    interval_days = ?,
+                    next_review_date = ?,
+                    last_reviewed_at = CURRENT_TIMESTAMP,
+                    total_reviews = total_reviews + 1,
+                    correct_reviews = correct_reviews + ?,
+                    mastery_level = ?
+                WHERE exercise_id = ?
+            """, (easiness_factor, repetition_number, interval_days, next_review_date,
+                  1 if correct else 0, mastery_level, exercise_id))
+        else:
+            # Create new record
+            self.conn.execute("""
+                INSERT INTO exercise_reviews
+                (exercise_id, course_code, easiness_factor, repetition_number, interval_days,
+                 next_review_date, last_reviewed_at, total_reviews, correct_reviews, mastery_level)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1, ?, ?)
+            """, (exercise_id, course_code, easiness_factor, repetition_number, interval_days,
+                  next_review_date, 1 if correct else 0, mastery_level))
+
+    def get_exercises_due_for_review(self, course_code: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get exercises that are due for review.
+
+        Args:
+            course_code: Course code to filter by
+            limit: Maximum number of exercises to return
+
+        Returns:
+            List of exercise review dictionaries
+        """
+        cursor = self.conn.execute("""
+            SELECT * FROM exercise_reviews
+            WHERE course_code = ?
+            AND next_review_date <= DATE('now')
+            ORDER BY next_review_date
+            LIMIT ?
+        """, (course_code, limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_exercises_by_mastery(self, course_code: str, mastery_level: str) -> List[Dict[str, Any]]:
+        """Get exercises filtered by mastery level.
+
+        Args:
+            course_code: Course code to filter by
+            mastery_level: Mastery level ('new', 'learning', 'mastered')
+
+        Returns:
+            List of exercise review dictionaries
+        """
+        cursor = self.conn.execute("""
+            SELECT * FROM exercise_reviews
+            WHERE course_code = ? AND mastery_level = ?
+            ORDER BY last_reviewed_at DESC
+        """, (course_code, mastery_level))
+        return [dict(row) for row in cursor.fetchall()]
+
+    # Phase 5: Topic Mastery operations
+    def get_topic_mastery(self, topic_id: int) -> Optional[Dict[str, Any]]:
+        """Get mastery data for a topic.
+
+        Args:
+            topic_id: Topic ID
+
+        Returns:
+            Mastery data dictionary or None if not found
+        """
+        cursor = self.conn.execute(
+            "SELECT * FROM topic_mastery WHERE topic_id = ?", (topic_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def update_topic_mastery(self, topic_id: int, course_code: str,
+                            exercises_total: int, exercises_mastered: int):
+        """Update mastery data for a topic.
+
+        Args:
+            topic_id: Topic ID
+            course_code: Course code
+            exercises_total: Total number of exercises in topic
+            exercises_mastered: Number of mastered exercises
+        """
+        mastery_percentage = (exercises_mastered / exercises_total * 100.0) if exercises_total > 0 else 0.0
+
+        # Check if mastery record exists
+        existing = self.get_topic_mastery(topic_id)
+
+        if existing:
+            # Update existing record
+            self.conn.execute("""
+                UPDATE topic_mastery
+                SET exercises_total = ?,
+                    exercises_mastered = ?,
+                    mastery_percentage = ?,
+                    last_practiced_at = CURRENT_TIMESTAMP
+                WHERE topic_id = ?
+            """, (exercises_total, exercises_mastered, mastery_percentage, topic_id))
+        else:
+            # Create new record
+            self.conn.execute("""
+                INSERT INTO topic_mastery
+                (topic_id, course_code, exercises_total, exercises_mastered,
+                 mastery_percentage, last_practiced_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (topic_id, course_code, exercises_total, exercises_mastered, mastery_percentage))
+
+    def get_all_topic_mastery(self, course_code: str) -> List[Dict[str, Any]]:
+        """Get mastery data for all topics in a course.
+
+        Args:
+            course_code: Course code to filter by
+
+        Returns:
+            List of topic mastery dictionaries with topic names
+        """
+        cursor = self.conn.execute("""
+            SELECT tm.*, t.name as topic_name
+            FROM topic_mastery tm
+            JOIN topics t ON tm.topic_id = t.id
+            WHERE tm.course_code = ?
+            ORDER BY tm.mastery_percentage DESC
+        """, (course_code,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def recalculate_topic_mastery(self, topic_id: int, course_code: str):
+        """Recalculate mastery percentage for a topic based on exercise reviews.
+
+        Args:
+            topic_id: Topic ID
+            course_code: Course code
+        """
+        # Count total exercises for this topic
+        cursor = self.conn.execute("""
+            SELECT COUNT(*) FROM exercises
+            WHERE topic_id = ?
+        """, (topic_id,))
+        exercises_total = cursor.fetchone()[0]
+
+        # Count mastered exercises (those with mastery_level = 'mastered')
+        cursor = self.conn.execute("""
+            SELECT COUNT(*) FROM exercise_reviews er
+            JOIN exercises e ON er.exercise_id = e.id
+            WHERE e.topic_id = ? AND er.mastery_level = 'mastered'
+        """, (topic_id,))
+        exercises_mastered = cursor.fetchone()[0]
+
+        # Update topic mastery
+        self.update_topic_mastery(topic_id, course_code, exercises_total, exercises_mastered)

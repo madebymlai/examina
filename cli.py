@@ -771,32 +771,440 @@ def generate(course, loop, difficulty, lang):
 
 
 @cli.command()
-@click.option('--course', '-c', required=True, help='Course code')
-@click.option('--questions', '-q', default=10, help='Number of questions')
-@click.option('--loop', '-l', help='Specific core loop')
-@click.option('--topic', '-t', help='Specific topic')
-def quiz(course, questions, loop, topic):
-    """Take a quiz to test your knowledge."""
-    console.print(f"\n[bold cyan]Quiz mode for {course} ({questions} questions)...[/bold cyan]\n")
-    console.print("[yellow]⚠️  This feature is not yet implemented.[/yellow]")
-    console.print("Coming in Phase 5: Quiz system.\n")
+@click.option('--course', '-c', required=True, help='Course code (e.g., B006802 or ADE)')
+@click.option('--questions', '-n', type=int, default=10, help='Number of questions (default: 10)')
+@click.option('--topic', '-t', help='Filter by topic')
+@click.option('--loop', '-l', help='Filter by core loop ID')
+@click.option('--difficulty', '-d', type=click.Choice(['easy', 'medium', 'hard']),
+              help='Filter by difficulty')
+@click.option('--review-only', is_flag=True, help='Only exercises due for review')
+@click.option('--lang', type=click.Choice(['en', 'it']), default='en',
+              help='Language for feedback (default: en)')
+def quiz(course, questions, topic, loop, difficulty, review_only, lang):
+    """Take an interactive quiz to test your knowledge."""
+    from core.quiz_engine import QuizEngine
+    from models.llm_manager import LLMManager
+    from rich.panel import Panel
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+    import time
+
+    try:
+        # Find course
+        with Database() as db:
+            all_courses = db.get_all_courses()
+            found_course = None
+            for c in all_courses:
+                if c['code'] == course or c['acronym'] == course:
+                    found_course = c
+                    break
+
+            if not found_course:
+                console.print(f"\n[red]Course '{course}' not found.[/red]\n")
+                console.print("Use 'examina courses' to see available courses.\n")
+                return
+
+            course_code = found_course['code']
+
+        # Initialize quiz engine
+        llm = LLMManager(provider="anthropic")
+        quiz_engine = QuizEngine(llm_manager=llm, language=lang)
+
+        # Create quiz session
+        console.print(f"\n[bold cyan]Creating quiz for {found_course['name']}...[/bold cyan]\n")
+
+        try:
+            session = quiz_engine.create_quiz_session(
+                course_code=course_code,
+                num_questions=questions,
+                topic=topic,
+                core_loop=loop,
+                difficulty=difficulty,
+                review_only=review_only
+            )
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]\n")
+            console.print("Try different filters or add more exercises.\n")
+            return
+
+        # Display quiz info
+        quiz_info = f"📝 Quiz Session: {session.total_questions} questions"
+        if topic:
+            quiz_info += f" | Topic: {topic}"
+        if loop:
+            quiz_info += f" | Core Loop: {loop}"
+        if difficulty:
+            quiz_info += f" | Difficulty: {difficulty}"
+        if review_only:
+            quiz_info += " | Review Mode"
+
+        console.print(Panel(quiz_info, style="cyan"))
+        console.print()
+
+        # Quiz loop
+        for i, question in enumerate(session.questions, 1):
+            question_start_time = time.time()
+
+            # Display question
+            console.print(f"[bold]Question {i}/{session.total_questions}[/bold]")
+            console.print(f"[dim]Topic: {question.topic_name} | Core Loop: {question.core_loop_name} | Difficulty: {question.difficulty}[/dim]\n")
+
+            console.print(Panel(question.exercise_text, title="Exercise", border_style="blue"))
+            console.print()
+
+            # Get user answer
+            console.print("[dim]Type your answer (press Enter twice to submit):[/dim]")
+            answer_lines = []
+            empty_count = 0
+
+            while True:
+                try:
+                    line = input()
+                    if line == "":
+                        empty_count += 1
+                        if empty_count >= 2:
+                            break
+                    else:
+                        empty_count = 0
+                    answer_lines.append(line)
+                except EOFError:
+                    break
+
+            user_answer = "\n".join(answer_lines[:-1]) if answer_lines else ""
+
+            if not user_answer.strip():
+                console.print("\n[yellow]Skipped (no answer provided)[/yellow]\n")
+                continue
+
+            # Evaluate answer
+            console.print("\n[dim]Evaluating your answer...[/dim]")
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                progress.add_task(description="Checking...", total=None)
+                evaluation = quiz_engine.evaluate_answer(
+                    session=session,
+                    question=question,
+                    user_answer=user_answer,
+                    provide_hints=False
+                )
+
+            # Update question with results
+            question.user_answer = user_answer
+            question.is_correct = evaluation['is_correct']
+            question.score = evaluation['score']
+            question.feedback = evaluation['feedback']
+            question.time_spent = int(time.time() - question_start_time)
+
+            # Display feedback
+            console.print()
+            if question.is_correct:
+                console.print(Panel(
+                    evaluation['feedback'],
+                    title="✅ Correct!",
+                    border_style="green"
+                ))
+            else:
+                console.print(Panel(
+                    evaluation['feedback'],
+                    title="❌ Incorrect",
+                    border_style="red"
+                ))
+
+            console.print(f"\n[dim]Score: {question.score:.1%}[/dim]")
+
+            # Show progress
+            answered = i
+            session.total_correct = sum(1 for q in session.questions[:answered] if q.is_correct)
+            console.print(f"[dim]Progress: {answered}/{session.total_questions} | Correct: {session.total_correct}/{answered}[/dim]\n")
+
+            # Wait for user to continue (except on last question)
+            if i < session.total_questions:
+                input("[dim]Press Enter to continue...[/dim]\n")
+                console.print()
+
+        # Complete session
+        quiz_engine.complete_session(session)
+
+        # Display final results
+        console.print("\n" + "="*60 + "\n")
+        console.print("[bold cyan]📊 Quiz Complete![/bold cyan]\n")
+
+        final_score = session.score * 100
+        score_color = "green" if final_score >= 80 else "yellow" if final_score >= 60 else "red"
+
+        console.print(f"[bold]Final Score: [{score_color}]{final_score:.1f}%[/{score_color}][/bold]")
+        console.print(f"Correct: {session.total_correct}/{session.total_questions}")
+
+        if session.started_at and session.completed_at:
+            duration = (session.completed_at - session.started_at).total_seconds()
+            console.print(f"Time: {int(duration // 60)}m {int(duration % 60)}s")
+
+        # Show mastery updates
+        console.print("\n[bold]Mastery Updates:[/bold]")
+        from core.analytics import ProgressAnalytics
+        analytics = ProgressAnalytics()
+
+        # Get unique core loops from quiz
+        core_loops = set(q.core_loop_id for q in session.questions if q.core_loop_id)
+        for loop_id in core_loops:
+            progress = analytics.get_core_loop_progress(course_code, loop_id)
+            loop_name = next((q.core_loop_name for q in session.questions if q.core_loop_id == loop_id), loop_id)
+
+            mastery_pct = progress['mastery_score'] * 100
+            mastery_color = "green" if mastery_pct >= 80 else "yellow" if mastery_pct >= 50 else "red"
+
+            console.print(f"  • {loop_name}: [{mastery_color}]{mastery_pct:.0f}%[/{mastery_color}] mastery")
+
+        console.print(f"\n[dim]Session ID: {session.session_id}[/dim]\n")
+
+    except KeyboardInterrupt:
+        console.print("\n\n[yellow]Quiz cancelled.[/yellow]\n")
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}\n")
+        import traceback
+        traceback.print_exc()
+        raise click.Abort()
 
 
 @cli.command()
-def suggest():
-    """Get study suggestions based on spaced repetition."""
-    console.print("\n[bold cyan]Study Suggestions[/bold cyan]\n")
-    console.print("[yellow]⚠️  This feature is not yet implemented.[/yellow]")
-    console.print("Coming in Phase 5: Progress tracking and recommendations.\n")
+@click.option('--course', '-c', help='Course code (e.g., B006802 or ADE)')
+def suggest(course):
+    """Get personalized study suggestions based on spaced repetition."""
+    from core.analytics import ProgressAnalytics
+    from rich.panel import Panel
+
+    try:
+        # Find course
+        course_code = None
+        if course:
+            with Database() as db:
+                all_courses = db.get_all_courses()
+                found_course = None
+                for c in all_courses:
+                    if c['code'] == course or c['acronym'] == course:
+                        found_course = c
+                        break
+
+                if not found_course:
+                    console.print(f"\n[red]Course '{course}' not found.[/red]\n")
+                    console.print("Use 'examina courses' to see available courses.\n")
+                    return
+
+                course_code = found_course['code']
+
+        # Get suggestions
+        analytics = ProgressAnalytics()
+        suggestions = analytics.get_study_suggestions(course_code)
+
+        # Display suggestions
+        console.print("\n[bold cyan]📚 Study Suggestions[/bold cyan]\n")
+
+        if course_code:
+            with Database() as db:
+                course_info = db.get_course(course_code)
+                console.print(f"[dim]Course: {course_info['name']} ({course_info['acronym']})[/dim]\n")
+
+        for suggestion in suggestions:
+            console.print(f"  {suggestion}")
+
+        console.print("\n[dim]Use 'examina quiz --course <CODE>' to start practicing![/dim]\n")
+
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}\n")
+        import traceback
+        traceback.print_exc()
+        raise click.Abort()
 
 
 @cli.command()
-@click.option('--course', '-c', help='Filter by course')
-def progress(course):
-    """View your learning progress."""
-    console.print("\n[bold cyan]Learning Progress[/bold cyan]\n")
-    console.print("[yellow]⚠️  This feature is not yet implemented.[/yellow]")
-    console.print("Coming in Phase 5: Progress tracking.\n")
+@click.option('--course', '-c', help='Course code (e.g., B006802 or ADE)')
+@click.option('--topics', is_flag=True, help='Show topic breakdown')
+@click.option('--detailed', is_flag=True, help='Show detailed statistics')
+def progress(course, topics, detailed):
+    """View your learning progress and mastery levels."""
+    from core.analytics import ProgressAnalytics
+    from rich.progress import Progress as RichProgress, BarColumn, TextColumn, TaskProgressColumn
+    from rich.panel import Panel
+
+    try:
+        # Find course
+        if not course:
+            console.print("\n[yellow]Please specify a course with --course[/yellow]\n")
+            console.print("Use 'examina courses' to see available courses.\n")
+            return
+
+        with Database() as db:
+            all_courses = db.get_all_courses()
+            found_course = None
+            for c in all_courses:
+                if c['code'] == course or c['acronym'] == course:
+                    found_course = c
+                    break
+
+            if not found_course:
+                console.print(f"\n[red]Course '{course}' not found.[/red]\n")
+                console.print("Use 'examina courses' to see available courses.\n")
+                return
+
+            course_code = found_course['code']
+
+        # Get analytics
+        analytics = ProgressAnalytics()
+        summary = analytics.get_course_summary(course_code)
+
+        # Display course header
+        console.print(f"\n[bold cyan]{found_course['name']}[/bold cyan]")
+        console.print(f"[dim]{found_course['code']} • {found_course['acronym']}[/dim]\n")
+
+        # Overall progress
+        console.print("[bold]📊 Overall Progress[/bold]\n")
+
+        # Create progress bars
+        if summary['total_exercises'] > 0:
+            # Attempted progress
+            attempted_pct = (summary['exercises_attempted'] / summary['total_exercises']) * 100
+            mastered_pct = (summary['exercises_mastered'] / summary['total_exercises']) * 100
+
+            console.print(f"Exercises Attempted: {summary['exercises_attempted']}/{summary['total_exercises']} ({attempted_pct:.1f}%)")
+            with RichProgress(
+                TextColumn(""),
+                BarColumn(complete_style="cyan", finished_style="cyan"),
+                TaskProgressColumn(),
+                console=console
+            ) as progress_bar:
+                task = progress_bar.add_task("", total=summary['total_exercises'])
+                progress_bar.update(task, completed=summary['exercises_attempted'])
+
+            console.print(f"\nExercises Mastered: {summary['exercises_mastered']}/{summary['total_exercises']} ({mastered_pct:.1f}%)")
+            with RichProgress(
+                TextColumn(""),
+                BarColumn(complete_style="green", finished_style="green"),
+                TaskProgressColumn(),
+                console=console
+            ) as progress_bar:
+                task = progress_bar.add_task("", total=summary['total_exercises'])
+                progress_bar.update(task, completed=summary['exercises_mastered'])
+
+            console.print(f"\nOverall Mastery: {summary['overall_mastery']:.1%}")
+            mastery_color = "green" if summary['overall_mastery'] >= 0.8 else "yellow" if summary['overall_mastery'] >= 0.5 else "red"
+            with RichProgress(
+                TextColumn(""),
+                BarColumn(complete_style=mastery_color, finished_style=mastery_color),
+                TaskProgressColumn(),
+                console=console
+            ) as progress_bar:
+                task = progress_bar.add_task("", total=100)
+                progress_bar.update(task, completed=int(summary['overall_mastery'] * 100))
+        else:
+            console.print("[yellow]No exercises found. Run 'examina ingest' and 'examina analyze' first.[/yellow]")
+
+        console.print()
+
+        # Quiz statistics
+        if summary['quiz_sessions_completed'] > 0:
+            console.print("[bold]🎯 Quiz Statistics[/bold]\n")
+            console.print(f"Sessions Completed: {summary['quiz_sessions_completed']}")
+            console.print(f"Average Score: {summary['avg_score']:.1%}")
+            console.print(f"Total Time: {summary['total_time_spent']} minutes\n")
+
+        # Core loops progress
+        if summary['core_loops_discovered'] > 0:
+            console.print("[bold]🔄 Core Loops[/bold]\n")
+            console.print(f"Discovered: {summary['core_loops_discovered']}")
+            console.print(f"Attempted: {summary['core_loops_attempted']}")
+
+            if summary['core_loops_attempted'] > 0:
+                progress_pct = (summary['core_loops_attempted'] / summary['core_loops_discovered']) * 100
+                console.print(f"Progress: {progress_pct:.1f}%")
+
+            console.print()
+
+        # Topic breakdown
+        if topics or detailed:
+            console.print("[bold]📚 Topic Breakdown[/bold]\n")
+            breakdown = analytics.get_topic_breakdown(course_code)
+
+            if breakdown:
+                # Create table
+                from rich.table import Table
+                table = Table(show_header=True, header_style="bold")
+                table.add_column("Topic", style="cyan")
+                table.add_column("Status", justify="center")
+                table.add_column("Mastery", justify="right")
+                table.add_column("Exercises", justify="right")
+
+                for topic_data in breakdown:
+                    # Status icon
+                    status_icons = {
+                        'mastered': '✅',
+                        'in_progress': '🔄',
+                        'weak': '⚠️',
+                        'not_started': '❌'
+                    }
+                    status = status_icons.get(topic_data['status'], '❓')
+
+                    # Mastery color
+                    mastery = topic_data['mastery_score']
+                    mastery_color = "green" if mastery >= 0.8 else "yellow" if mastery >= 0.5 else "red" if mastery > 0 else "dim"
+                    mastery_str = f"[{mastery_color}]{mastery:.1%}[/{mastery_color}]"
+
+                    # Exercises
+                    exercises_str = f"{topic_data['exercises_attempted']}/{topic_data['exercises_count']}"
+
+                    table.add_row(
+                        topic_data['topic_name'],
+                        status,
+                        mastery_str,
+                        exercises_str
+                    )
+
+                console.print(table)
+                console.print()
+            else:
+                console.print("[dim]No topics discovered yet.[/dim]\n")
+
+        # Detailed statistics
+        if detailed:
+            console.print("[bold]🔍 Detailed Statistics[/bold]\n")
+
+            # Weak areas
+            weak_areas = analytics.get_weak_areas(course_code)
+            if weak_areas:
+                console.print("[bold red]Weak Areas (< 50% mastery):[/bold red]")
+                for area in weak_areas[:5]:  # Top 5
+                    console.print(f"  • {area['name']} ({area['topic_name']}): {area['mastery_score']:.1%} mastery")
+                console.print()
+
+            # Due reviews
+            due_reviews = analytics.get_due_reviews(course_code)
+            if due_reviews:
+                overdue = [r for r in due_reviews if r['priority'] == 'overdue']
+                due_today = [r for r in due_reviews if r['priority'] == 'due_today']
+
+                if overdue:
+                    console.print(f"[bold red]Overdue Reviews ({len(overdue)}):[/bold red]")
+                    for review in overdue[:5]:
+                        console.print(f"  • {review['core_loop_name']}: {review['days_overdue']} days overdue")
+                    console.print()
+
+                if due_today:
+                    console.print(f"[bold yellow]Due Today ({len(due_today)}):[/bold yellow]")
+                    for review in due_today[:5]:
+                        console.print(f"  • {review['core_loop_name']}")
+                    console.print()
+
+        # Next steps
+        console.print("[dim]Use 'examina suggest --course {0}' for study recommendations[/dim]".format(course_code))
+        console.print("[dim]Use 'examina quiz --course {0}' to start practicing[/dim]\n".format(course_code))
+
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}\n")
+        import traceback
+        traceback.print_exc()
+        raise click.Abort()
 
 
 if __name__ == '__main__':
