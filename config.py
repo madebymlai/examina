@@ -61,6 +61,10 @@ class Config:
     SEMANTIC_SIMILARITY_THRESHOLD = float(os.getenv("EXAMINA_SEMANTIC_THRESHOLD", "0.85"))  # Threshold for semantic similarity
     SEMANTIC_LOG_NEAR_MISSES = os.getenv("EXAMINA_LOG_NEAR_MISSES", "true").lower() == "true"  # Log items with high similarity but semantic difference
 
+    # Study Strategy Settings
+    STUDY_STRATEGY_CACHE_DIR = DATA_DIR / "strategy_cache"  # Cache directory for generated strategies
+    STUDY_STRATEGY_CACHE_ENABLED = True  # Cache generated strategies for reuse
+
     # Supported languages
     SUPPORTED_LANGUAGES = ["it", "en"]  # Italian and English
     DEFAULT_LANGUAGE = os.getenv("EXAMINA_LANGUAGE", "en")  # Default to English
@@ -74,6 +78,7 @@ class Config:
         cls.IMAGES_PATH.mkdir(exist_ok=True)
         cls.CHROMA_PATH.mkdir(exist_ok=True)
         cls.CACHE_PATH.mkdir(exist_ok=True)
+        cls.STUDY_STRATEGY_CACHE_DIR.mkdir(exist_ok=True)
 
     @classmethod
     def get_course_pdf_dir(cls, course_code):
