@@ -310,8 +310,25 @@
     - Streaming pipeline (exercise → analyze → dedupe → store)
     - Retry logic with exponential backoff
 
+- [ ] **Phase 2.5: UI/UX Design** (Figma)
+  - Create comprehensive Figma AI prompt covering all features:
+    - Course management (add, list, view info, concept map)
+    - Content ingestion (upload exams, notes, progress tracking)
+    - Analysis dashboard (progress, weak areas, patterns)
+    - Interactive learning (adaptive tutor, quiz, proof practice)
+    - Progress visualization (mastery levels, spaced repetition schedule)
+  - Define style options:
+    - **Academic/Professional** - Clean, minimal, focus on content
+    - **Gamified** - Progress bars, achievements, streaks
+    - **Modern SaaS** - Dashboard-centric, metrics-heavy
+  - Generate component library (buttons, cards, forms, charts)
+  - Create user flows for key journeys:
+    - New user onboarding → first course → first quiz
+    - Returning user → review session → progress check
+  - Mobile-responsive layouts
+
 - [ ] **Phase 3: Frontend** (Private Repo)
-  - React/Vue web UI
+  - React/Vue web UI (based on Figma designs)
   - File upload and PDF processing
   - Interactive quiz interface
   - Progress dashboards
@@ -365,11 +382,11 @@
 
 ## Low Priority / Future
 
-- [ ] Language detection for procedures - Automatically detect and merge equivalent procedures
-- [ ] Concept normalization - Handle variations like "autovalori_autovettori" vs "autovalori_e_autovettori"
-- [ ] Interactive merge review for deduplication - Manual approve/reject
-- [ ] Merge history tracking - Allow undo operations
-- [ ] Core loop similarity tuning - Review 95 ADE merges (might be legitimate)
+- [x] Language detection for procedures ✅ - Already implemented in Phase 6 (detect-languages, --monolingual)
+- [ ] Concept normalization - Minor: some topics use underscores vs spaces (cosmetic, doesn't affect functionality)
+- [ ] Interactive merge review for deduplication - Manual approve/reject (web feature)
+- [ ] Merge history tracking - Allow undo operations (web feature)
+- [x] Core loop similarity tuning ✅ - Reviewed: 9 similar names are legitimate distinct procedures (e.g., POS vs SOP minimization)
 
 ## Known Issues
 

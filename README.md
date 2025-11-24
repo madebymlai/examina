@@ -7,9 +7,10 @@ AI-powered exam preparation system that learns from your course materials to hel
 Examina analyzes your course materials (past exams, homework, problem sets, lecture notes) to automatically:
 - **Discover topics & procedures** - Identifies recurring problem-solving patterns ("core loops")
 - **Build a knowledge base** - Extracts exercises, procedures, and solving strategies
-- **Teach interactively** - Provides AI tutoring with theory, examples, and feedback
-- **Track progress** - Uses spaced repetition (SM-2) to optimize learning
-- **Generate practice** - Creates new exercises based on learned patterns
+- **Teach adaptively** - AI tutoring that adjusts depth based on your mastery level
+- **Track progress** - Uses spaced repetition (SM-2) with mastery cascade updates
+- **Enforce prerequisites** - Warns when foundational concepts need review
+- **Generate practice** - Creates mastery-based quizzes prioritizing weak areas
 
 ## Quick Start
 
@@ -20,19 +21,25 @@ Examina analyzes your course materials (past exams, homework, problem sets, lect
 git clone https://github.com/madebymlai/Examina.git
 cd Examina
 python -m venv venv
-source venv/bin/activate  # Linux/Mac: source venv/bin/activate | Windows: venv\Scripts\activate
+source venv/bin/activate  # Linux/Mac | Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# Configure LLM (choose one)
-export ANTHROPIC_API_KEY="your-key"  # Recommended - best quality
-export GROQ_API_KEY="your-key"       # Alternative - fast & free tier
+# Configure LLM providers (set the ones you want to use)
+export DEEPSEEK_API_KEY="your-key"   # Recommended for bulk analysis (cheapest)
+export GROQ_API_KEY="your-key"       # Recommended for quizzes (fast)
+export ANTHROPIC_API_KEY="your-key"  # Optional - premium explanations
 
-# Or use local Ollama
-ollama pull nomic-embed-text
+# Choose a provider profile
+export EXAMINA_PROVIDER_PROFILE=free  # free|pro|local
 
 # Initialize database
 python3 cli.py init
 ```
+
+**Provider Profiles:**
+- `free` - DeepSeek for analysis, Groq for quizzes (cost-effective)
+- `pro` - DeepSeek for analysis, Anthropic for explanations (best quality)
+- `local` - Ollama only (private, requires local GPU)
 
 ### Basic Usage
 
@@ -44,16 +51,17 @@ python3 cli.py add-course --code ADE --name "Computer Architecture"
 python3 cli.py ingest --course ADE --zip course_materials.zip
 
 # 3. Analyze with AI (discovers topics & procedures)
-python3 cli.py analyze --course ADE --provider anthropic
+python3 cli.py analyze --course ADE --profile free
 
 # 4. View what was learned
 python3 cli.py info --course ADE
+python3 cli.py concept-map --course ADE  # Visual concept hierarchy
 
-# 5. Start learning
+# 5. Start learning (adaptive depth based on mastery)
 python3 cli.py learn --course ADE --loop "Mealy Machine Design"
 
-# 6. Take a quiz
-python3 cli.py quiz --course ADE --questions 5
+# 6. Take an adaptive quiz (prioritizes weak areas)
+python3 cli.py quiz --course ADE --questions 5 --adaptive
 
 # 7. Check progress
 python3 cli.py progress --course ADE
@@ -87,26 +95,32 @@ Examina works with **any course material containing problems and exercises**:
 - Supports theory questions, proofs, and procedural exercises
 - Works across any subject (Computer Science, Math, Engineering, etc.)
 
-### 🧠 AI Tutoring
-- **Learn mode**: Theory explanations with prerequisites, examples, and analogies
-- **Practice mode**: Interactive problem-solving with hints and feedback
-- **Quiz mode**: AI-evaluated answers with detailed explanations
+### 🧠 Adaptive AI Tutoring
+- **Adaptive depth** - Explanation complexity adjusts to your mastery level
+- **Prerequisite enforcement** - Warns when foundational concepts need review
+- **Real-time feedback** - Shows mastery progress after each quiz answer
+- **Personalized learning paths** - Recommends what to study next
 
-### 📊 Progress Tracking
-- SM-2 spaced repetition algorithm
+### 📊 Mastery Tracking
+- SM-2 spaced repetition with cascade updates (exercise → topic → course)
 - Mastery levels: new → learning → reviewing → mastered
-- Analytics dashboard with weak areas identification
-- Personalized study suggestions
+- **Concept map visualization** - See topic/core loop hierarchy with mastery
+- **Weak area detection** - Automatically identifies gaps in knowledge
+
+### 🎮 Adaptive Quizzes
+- **Mastery-based selection** - 40% weak, 40% learning, 20% strong exercises
+- **Prerequisite awareness** - Shows tips when prerequisites are weak
+- Filter by topic, difficulty, procedure type, or exercise type
 
 ### 🌐 Multi-Language
 - Full Italian/English support
 - Bilingual deduplication (merges "Finite State Machine" ↔ "Macchina a Stati Finiti")
 
-### ⚡ Performance
+### ⚡ Performance & Cost
+- **Provider routing** - Automatically uses cheapest provider per task type
 - **Procedure pattern caching** - 100% cache hit rate on re-analysis
 - **Async/await analysis** - 1.1-5x faster with concurrent LLM calls
 - **26+ exercises/second** with cached patterns
-- **Batch processing** - Optimized for bulk analysis
 
 ## Commands Reference
 
@@ -115,6 +129,8 @@ Examina works with **any course material containing problems and exercises**:
 python3 cli.py add-course --code B006802 --name "Architettura degli Elaboratori"
 python3 cli.py list-courses
 python3 cli.py info --course B006802
+python3 cli.py concept-map --course B006802              # Visual hierarchy
+python3 cli.py concept-map --course B006802 --show-mastery  # With progress
 ```
 
 ### Content Ingestion
@@ -136,8 +152,11 @@ python3 cli.py ingest --course B006802 --dir ./course_pdfs/
 
 ### Analysis
 ```bash
-# Analyze all exercises
-python3 cli.py analyze --course B006802 --provider anthropic --lang it
+# Analyze with provider profile (recommended)
+python3 cli.py analyze --course B006802 --profile free --lang it
+
+# Or specify provider directly
+python3 cli.py analyze --course B006802 --provider deepseek
 
 # Resume interrupted analysis
 python3 cli.py analyze --course B006802 --resume
@@ -148,18 +167,24 @@ python3 cli.py analyze --course B006802 --force
 
 ### Learning
 ```bash
-# Learn a specific procedure
+# Learn a specific procedure (adaptive depth based on mastery)
 python3 cli.py learn --course B006802 --loop "Moore Machine Design"
 
-# With depth control
+# Manual depth control
 python3 cli.py learn --course B006802 --loop "Mealy Machine Design" --depth advanced
 
-# Skip prerequisites
+# Skip prerequisite check
+python3 cli.py learn --course B006802 --loop "FSM Minimization" --force
+
+# Skip prerequisite explanations
 python3 cli.py learn --course B006802 --loop "FSM Minimization" --no-concepts
 ```
 
 ### Quizzes
 ```bash
+# Adaptive quiz (prioritizes weak areas - recommended)
+python3 cli.py quiz --course B006802 --questions 10 --adaptive
+
 # Random quiz
 python3 cli.py quiz --course B006802 --questions 10
 
@@ -199,17 +224,38 @@ python3 cli.py pattern-cache --clear           # Clear cache entries
 
 ## Configuration
 
+### Provider Profiles (Recommended)
+
+Use `--profile` to automatically route tasks to optimal providers:
+
+```bash
+python3 cli.py analyze --course ADE --profile free
+python3 cli.py quiz --course ADE --profile pro
+```
+
+| Profile | Bulk Analysis | Interactive | Premium |
+|---------|---------------|-------------|---------|
+| `free`  | DeepSeek      | Groq        | Disabled |
+| `pro`   | DeepSeek      | Anthropic   | Anthropic |
+| `local` | Ollama        | Ollama      | Ollama |
+
 ### LLM Providers
 
-**Anthropic Claude Sonnet 4.5** (Recommended)
-- Best quality and reasoning
-- Higher rate limits
-- `--provider anthropic`
+**DeepSeek** (Recommended for bulk)
+- 671B MoE model, excellent reasoning
+- $0.14/M tokens (10-20x cheaper than Anthropic)
+- No rate limiting
+- `--provider deepseek`
 
 **Groq** (Free tier available)
 - Fast inference
 - 30 requests/minute free tier
 - `--provider groq`
+
+**Anthropic Claude** (Premium quality)
+- Best explanations and reasoning
+- Higher cost
+- `--provider anthropic`
 
 **Ollama** (Local)
 - Free and private
@@ -219,10 +265,13 @@ python3 cli.py pattern-cache --clear           # Clear cache entries
 ### Environment Variables
 
 ```bash
-# LLM Provider
-export EXAMINA_LLM_PROVIDER=anthropic  # or groq, ollama
-export ANTHROPIC_API_KEY="your-key"
+# Provider Profile (recommended)
+export EXAMINA_PROVIDER_PROFILE=free   # free|pro|local
+
+# API Keys (set the ones you need)
+export DEEPSEEK_API_KEY="your-key"
 export GROQ_API_KEY="your-key"
+export ANTHROPIC_API_KEY="your-key"
 
 # Analysis Settings
 export EXAMINA_MIN_CONFIDENCE=0.5      # Filter low-confidence analyses
@@ -239,10 +288,10 @@ export EXAMINA_SEMANTIC_MATCHING=1
 
 ## Project Status
 
-**Production Ready:**
+**Production Ready (CLI Complete):**
 - ✅ PDF ingestion & extraction
 - ✅ AI analysis & knowledge discovery
-- ✅ Interactive AI tutor
+- ✅ Interactive AI tutor with adaptive depth
 - ✅ Quiz system with spaced repetition
 - ✅ Multi-procedure extraction
 - ✅ Automatic topic splitting
@@ -250,9 +299,12 @@ export EXAMINA_SEMANTIC_MATCHING=1
 - ✅ Bilingual deduplication
 - ✅ Procedure pattern caching (v0.14.0)
 - ✅ Async/await analysis pipeline (v0.13.0)
+- ✅ Adaptive teaching based on mastery (v0.15.0)
+- ✅ Prerequisite enforcement
+- ✅ Provider routing (free/pro/local profiles)
+- ✅ Concept map visualization
 
 **Planned:**
-- 📋 Adaptive teaching based on mastery
 - 📋 Web application interface
 
 See [TODO.md](TODO.md) for detailed task list and [CHANGELOG.md](CHANGELOG.md) for version history.
@@ -261,20 +313,26 @@ See [TODO.md](TODO.md) for detailed task list and [CHANGELOG.md](CHANGELOG.md) f
 
 ```
 Examina/
-├── cli.py              # Main CLI interface
-├── config.py           # Configuration management
-├── core/               # Core modules
-│   ├── analyzer.py     # Exercise analysis
-│   ├── tutor.py        # AI teaching
-│   ├── quiz_engine.py  # Quiz system
-│   ├── sm2.py          # Spaced repetition
-│   ├── semantic_matcher.py  # Deduplication
-│   └── procedure_cache.py   # Pattern caching
-├── models/             # LLM integrations
-│   └── llm_manager.py  # Provider abstraction
-├── storage/            # Data layer
-│   └── database.py     # SQLite + migrations
-└── utils/              # Utilities
+├── cli.py                  # Main CLI interface
+├── config.py               # Configuration management
+├── core/                   # Core modules
+│   ├── analyzer.py         # Exercise analysis
+│   ├── tutor.py            # AI teaching
+│   ├── quiz_engine.py      # Quiz system with adaptive selection
+│   ├── sm2.py              # Spaced repetition
+│   ├── mastery_aggregator.py   # Mastery cascade updates
+│   ├── adaptive_teaching.py    # Prerequisite enforcement
+│   ├── semantic_matcher.py     # Deduplication
+│   ├── procedure_cache.py      # Pattern caching
+│   ├── provider_router.py      # Task-based provider routing
+│   └── task_types.py           # Task type definitions
+├── models/                 # LLM integrations
+│   └── llm_manager.py      # Provider abstraction
+├── storage/                # Data layer
+│   └── database.py         # SQLite + migrations
+├── config/                 # Configuration files
+│   └── provider_profiles.yaml  # Provider routing profiles
+└── utils/                  # Utilities
     ├── pdf_extractor.py
     └── splitter.py
 ```
