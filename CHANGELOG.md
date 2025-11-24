@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Sync mode: 90.9s (2 API calls)
   - Async mode: 34.3s (0 API calls - fully cached)
   - **Speedup: 2.65x (165% faster)**
+  - ⚠️ **Note**: Groq produced poor analysis quality (0-2/27 exercises accepted, 92-100% skip rate)
+  - **Recommendation**: Use DeepSeek or Anthropic for actual analysis; Groq benchmark demonstrates async benefits with rate limits but isn't suitable for this task
 
 - **Speedup factors**:
   - Best-case: 5x (many concurrent requests, high-latency provider)

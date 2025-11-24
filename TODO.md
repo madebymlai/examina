@@ -45,12 +45,14 @@
     - Micro-benchmark: 5 parallel requests = 5x speedup
     - Real-world (DeepSeek, no rate limit): 1.12x speedup (68.8s→61.4s)
     - Real-world (Groq, 30 req/min): 2.65x speedup (90.9s→34.3s)
+      - ⚠️ Groq has poor analysis quality (92-100% skip rate)
+      - Benchmark proves async helps with rate limits but don't use Groq for analysis
     - **Validated**: Async benefits scale significantly with rate limits
   - **Remaining options for further improvement**:
     - **Option 3**: Procedure pattern caching - High effort, very high gain
     - **Option 4**: Stream processing pipeline - High effort, architectural change
-  - **Current performance**: 0.39-0.79 ex/s (27 exercises in 34-69s depending on provider/mode)
-  - **Recommendation**: Use `--async-mode` with rate-limited providers (Groq) for best results
+  - **Current performance**: 0.39-0.44 ex/s with DeepSeek (27 exercises in 61-69s)
+  - **Recommendation**: Use DeepSeek + `--async-mode` for best balance of speed and quality
 
 ### Phase 6 - Multi-Core-Loop Support
 - [x] **Clean up orphaned core loops** - ✅ Added `--clean-orphans` flag to deduplicate command
