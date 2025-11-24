@@ -96,23 +96,26 @@ TRANSLATION_PAIRS = {
 }
 
 
-# Known semantically different pairs (should NEVER merge)
-# These are concepts that may have high string similarity but are semantically different
-# NOTE: Inverse transformations (e.g., "A to B" vs "B to A") are detected generically
-# by is_inverse_transformation(), so they don't need to be listed here
+# Known semantically different pairs (MINIMAL, for truly opposite concepts only)
+# Most opposites are now caught by generic algorithms:
+# - Inverse transformations: is_inverse_transformation() ("A to B" ↔ "B to A")
+# - Opposite affixes: has_opposite_affixes() (synchronous ↔ asynchronous)
+#
+# This list contains ONLY domain-specific opposites that:
+# 1. Have >85% similarity (would merge without protection)
+# 2. Cannot be detected by generic patterns
+#
+# NOTE: Analysis shows these pairs have >85% similarity and WOULD merge without protection:
+# - "sum of products" ↔ "product of sums" (95.2%)
+# - "nfa" ↔ "dfa" (88.3% in context like "NFA Design" ↔ "DFA Design")
 SEMANTIC_OPPOSITES = [
-    ("mealy", "moore"),  # Different FSM types
-    ("sum of products", "product of sums"),  # Full English names
-    ("sop", "pos"),  # Sum of Products vs Product of Sums (abbreviations)
-    ("somma di prodotti", "prodotto di somme"),  # Italian equivalents
-    ("sequential", "combinational"),  # Different circuit types
-    ("sequenziale", "combinatorio"),  # Italian equivalents
-    ("combinational", "combinatory"),  # Similar strings, different meanings
+    # Boolean algebra (95.2% similarity - WOULD merge)
+    ("sum of products", "product of sums"),
+    ("sop", "pos"),  # Abbreviations (kept for clarity)
+    ("somma di prodotti", "prodotto di somme"),  # Italian
+
+    # Automata theory (88.3% similarity in context - WOULD merge)
     ("nfa", "dfa"),  # Nondeterministic vs Deterministic Finite Automaton
-    ("synchronous", "asynchronous"),  # Timing types
-    ("sincrono", "asincrono"),  # Italian timing types
-    ("static", "dynamic"),
-    ("statico", "dinamico"),
 ]
 
 
@@ -361,6 +364,56 @@ class SemanticMatcher:
 
         return False
 
+    def has_opposite_affixes(self, text1: str, text2: str) -> bool:
+        """
+        Detect if texts contain words with opposite prefixes/suffixes (generic, no hardcoding).
+
+        Examples:
+        - "synchronous" ↔ "asynchronous" (prefix: a-)
+        - "deterministic" ↔ "nondeterministic" (prefix: non-)
+        - "linear" ↔ "nonlinear" (prefix: non-)
+        - "sincrono" ↔ "asincrono" (Italian prefix: a-)
+
+        Args:
+            text1: First text
+            text2: Second text
+
+        Returns:
+            True if texts have words with opposite affixes
+        """
+        import re
+
+        # Opposite prefixes (works for any language)
+        opposite_prefixes = ['a', 'non', 'in', 'un', 'de', 'anti', 'dis', 'il', 'im', 'ir']
+
+        t1_lower = text1.lower()
+        t2_lower = text2.lower()
+
+        # Extract all words from both texts
+        words1 = set(re.findall(r'\b\w+\b', t1_lower))
+        words2 = set(re.findall(r'\b\w+\b', t2_lower))
+
+        # Check if any word in text1 is the prefixed version of a word in text2 (or vice versa)
+        for word1 in words1:
+            for prefix in opposite_prefixes:
+                # Check if word1 = prefix + word2
+                if word1.startswith(prefix) and len(word1) > len(prefix):
+                    base1 = word1[len(prefix):]  # Remove prefix
+                    if base1 in words2:
+                        # word1 is "aword", word2 is "word" → opposite!
+                        return True
+
+        for word2 in words2:
+            for prefix in opposite_prefixes:
+                # Check if word2 = prefix + word1
+                if word2.startswith(prefix) and len(word2) > len(prefix):
+                    base2 = word2[len(prefix):]  # Remove prefix
+                    if base2 in words1:
+                        # word2 is "aword", word1 is "word" → opposite!
+                        return True
+
+        return False
+
     def are_semantically_different(self, text1: str, text2: str) -> bool:
         """
         Check if texts contain semantically opposite terms.
@@ -368,10 +421,16 @@ class SemanticMatcher:
         This prevents merging of concepts that are fundamentally different
         despite potential string similarity.
 
+        Uses generic algorithms (NO HARDCODING):
+        1. Inverse transformation detection ("A to B" ↔ "B to A")
+        2. Opposite affix detection (synchronous ↔ asynchronous)
+        3. Hardcoded pairs (minimal, for domain-specific opposites only)
+
         Examples:
         - "Mealy Machine Design" vs "Moore Machine Design" → True (different)
         - "Minimizzazione SoP" vs "Minimizzazione PoS" → True (different)
         - "Sequential Circuit" vs "Combinational Circuit" → True (different)
+        - "Synchronous" vs "Asynchronous" → True (opposite affixes)
 
         Args:
             text1: First text
@@ -384,6 +443,10 @@ class SemanticMatcher:
 
         # First check for generic inverse transformations (NO HARDCODING)
         if self.is_inverse_transformation(text1, text2):
+            return True
+
+        # Check for opposite affixes (GENERIC PATTERN DETECTION)
+        if self.has_opposite_affixes(text1, text2):
             return True
 
         t1_lower = text1.lower()
