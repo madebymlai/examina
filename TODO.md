@@ -53,8 +53,11 @@
 
 ### Phase 9 - Theory & Proof Support
 - [x] **Interactive proof practice mode** ✅ - Already implemented (`prove` command)
+- [x] **Tune theory detection threshold** ✅ (completed 2025-11-24)
+  - Lowered from 2 keywords → 1 keyword
+  - Added explicit prompt notes that 1 keyword is sufficient
+  - Expected to improve detection from 55% to 70%+
 - [ ] Re-analyze existing exercises with Phase 9 detection
-- [ ] Tune theory detection threshold (2 keywords → 1 keyword)
 - [ ] Build theory concept dependency visualization
 
 ### Phase 10 - Learning Materials as First-Class Content 🚧 IN PROGRESS
