@@ -2159,19 +2159,58 @@ def deduplicate(course, dry_run, threshold, bilingual):
                     console.print(f"    Similarity: {sim:.2f}, Reason: {reason}")
 
                 if not dry_run:
+                    # Build merge mapping to resolve chains (e.g., A←B, B←C → both map to A)
+                    merge_map = {}  # topic_id → canonical_topic_id
+
                     for t1, t2, sim, reason in topic_merges:
-                        # Update all exercises to use canonical topic
+                        merge_map[t2['id']] = t1['id']
+
+                    # Resolve chains: follow the chain to find ultimate target
+                    def get_canonical(topic_id):
+                        visited = set()
+                        current = topic_id
+                        while current in merge_map:
+                            if current in visited:
+                                # Circular reference, shouldn't happen but handle it
+                                break
+                            visited.add(current)
+                            current = merge_map[current]
+                        return current
+
+                    # Update merge_map with canonical targets
+                    for topic_id in list(merge_map.keys()):
+                        merge_map[topic_id] = get_canonical(merge_map[topic_id])
+
+                    # Apply merges: update all references to point to canonical topic
+                    for source_id, target_id in merge_map.items():
+                        # Update all exercises
                         db.conn.execute("""
                             UPDATE exercises SET topic_id = ? WHERE topic_id = ?
-                        """, (t1['id'], t2['id']))
+                        """, (target_id, source_id))
 
-                        # Update all core loops to use canonical topic
+                        # Update all core loops
                         db.conn.execute("""
                             UPDATE core_loops SET topic_id = ? WHERE topic_id = ?
-                        """, (t1['id'], t2['id']))
+                        """, (target_id, source_id))
 
-                        # Delete duplicate topic
-                        db.conn.execute("DELETE FROM topics WHERE id = ?", (t2['id'],))
+                        # Update topic_mastery
+                        db.conn.execute("""
+                            UPDATE topic_mastery SET topic_id = ? WHERE topic_id = ?
+                        """, (target_id, source_id))
+
+                        # Update quiz_sessions
+                        db.conn.execute("""
+                            UPDATE quiz_sessions SET filter_topic_id = ? WHERE filter_topic_id = ?
+                        """, (target_id, source_id))
+
+                        # Update theory_concepts
+                        db.conn.execute("""
+                            UPDATE theory_concepts SET topic_id = ? WHERE topic_id = ?
+                        """, (target_id, source_id))
+
+                    # Delete all merged topics (sources only, not targets)
+                    for source_id in merge_map.keys():
+                        db.conn.execute("DELETE FROM topics WHERE id = ?", (source_id,))
 
                     db.conn.commit()
                     console.print(f"\n[green]✓ Merged {len(topic_merges)} duplicate topics[/green]\n")
@@ -2221,23 +2260,55 @@ def deduplicate(course, dry_run, threshold, bilingual):
                     console.print(f"    Similarity: {sim:.2f}, Reason: {reason}")
 
                 if not dry_run:
+                    # Build merge mapping to resolve chains
+                    loop_merge_map = {}  # loop_id → canonical_loop_id
+
                     for l1, l2, sim, reason in loop_merges:
-                        # Update exercise_core_loops junction table
+                        loop_merge_map[l2['id']] = l1['id']
+
+                    # Resolve chains
+                    def get_canonical_loop(loop_id):
+                        visited = set()
+                        current = loop_id
+                        while current in loop_merge_map:
+                            if current in visited:
+                                break
+                            visited.add(current)
+                            current = loop_merge_map[current]
+                        return current
+
+                    # Update merge_map with canonical targets
+                    for loop_id in list(loop_merge_map.keys()):
+                        loop_merge_map[loop_id] = get_canonical_loop(loop_merge_map[loop_id])
+
+                    # Apply merges
+                    for source_id, target_id in loop_merge_map.items():
+                        # Delete duplicate entries from exercise_core_loops where exercise already has target
+                        db.conn.execute("""
+                            DELETE FROM exercise_core_loops
+                            WHERE core_loop_id = ?
+                            AND exercise_id IN (
+                                SELECT exercise_id FROM exercise_core_loops WHERE core_loop_id = ?
+                            )
+                        """, (source_id, target_id))
+
+                        # Update remaining exercise_core_loops entries
                         db.conn.execute("""
                             UPDATE exercise_core_loops
                             SET core_loop_id = ?
                             WHERE core_loop_id = ?
-                        """, (l1['id'], l2['id']))
+                        """, (target_id, source_id))
 
                         # Update legacy core_loop_id in exercises
                         db.conn.execute("""
                             UPDATE exercises
                             SET core_loop_id = ?
                             WHERE core_loop_id = ?
-                        """, (l1['id'], l2['id']))
+                        """, (target_id, source_id))
 
-                        # Delete duplicate core loop
-                        db.conn.execute("DELETE FROM core_loops WHERE id = ?", (l2['id'],))
+                    # Delete all merged core loops (sources only)
+                    for source_id in loop_merge_map.keys():
+                        db.conn.execute("DELETE FROM core_loops WHERE id = ?", (source_id,))
 
                     db.conn.commit()
                     console.print(f"\n[green]✓ Merged {len(loop_merges)} duplicate core loops[/green]\n")
