@@ -325,6 +325,7 @@ EXERCISE TYPE CLASSIFICATION (Phase 9.1):
   * Examples: "Define what is a vector space", "Explain the concept of eigenvalues"
   * Asks "What is...", "Define...", "Explain...", "Describe..."
   * No computational work required
+  * NOTE: Even ONE theory keyword (define, explain, what is, etc.) is sufficient to classify as theory
 
 - **proof**: Exercise requires proving a theorem, property, or statement
   * KEYWORDS to detect (Italian): "dimostra", "dimostrare", "dimostrazione", "provare", "prova che"
@@ -343,7 +344,8 @@ PROOF KEYWORD DETECTION:
 - Set type_confidence higher (0.9+) when proof keywords are explicitly present
 
 THEORY QUESTION CATEGORIZATION (Phase 9.2):
-For exercises with exercise_type="theory" or "hybrid", categorize into specific theory categories:
+For exercises with exercise_type="theory" or "hybrid", categorize into specific theory categories.
+NOTE: Presence of even ONE theory keyword from any category below is sufficient for classification.
 
 **definition**: Asks for a formal definition of a concept, term, or object
   * Keywords (IT): "definisci", "definizione", "cos'è", "cosa si intende per"
