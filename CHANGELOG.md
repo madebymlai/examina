@@ -5,6 +5,24 @@ All notable changes and completed phases are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2025-11-24
+
+### Changed
+- **Fully dynamic opposite detection** - Replaced hardcoded SEMANTIC_OPPOSITES list with LLM-based detection
+- Now works for ANY domain without hardcoding (Chemistry, Physics, Math, etc.)
+- LLM-based opposite detection for high-similarity pairs (>85%)
+- In-memory caching to avoid repeated API calls
+- Maintains Examina's "no hardcoding" philosophy
+
+### Benefits
+- Scales to new courses from any domain automatically
+- Detects domain-specific opposites:
+  - CS: SoP/PoS, NFA/DFA, Mealy/Moore
+  - Chemistry: endothermic/exothermic
+  - Physics: positive charge/negative charge
+  - Math: clockwise/counterclockwise
+- No maintenance required when adding new courses
+
 ## [0.9.3] - 2025-11-24
 
 ### Added

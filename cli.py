@@ -1995,14 +1995,21 @@ def deduplicate(course, dry_run, threshold, bilingual, clean_orphans):
     from difflib import SequenceMatcher
     import hashlib
 
-    # Try to import semantic matcher
+    # Try to import semantic matcher and LLM manager
     try:
         from core.semantic_matcher import SemanticMatcher
+        from models.llm_manager import LLMManager
+
+        # Create LLM manager for dynamic opposite detection
+        llm_provider = Config.LLM_PROVIDER
+        llm_manager = LLMManager(provider=llm_provider)
+        console.print(f"[info]LLM provider for opposite detection: {llm_provider}[/info]")
+
         if Config.SEMANTIC_SIMILARITY_ENABLED:
-            semantic_matcher = SemanticMatcher()
+            semantic_matcher = SemanticMatcher(llm_manager=llm_manager)
             use_semantic = semantic_matcher.enabled
             if use_semantic:
-                console.print("[info]Using semantic similarity matching[/info]")
+                console.print("[info]Using semantic similarity matching with dynamic opposite detection[/info]")
                 default_threshold = Config.SEMANTIC_SIMILARITY_THRESHOLD
             else:
                 console.print("[yellow]Semantic matcher unavailable, using string similarity[/yellow]")

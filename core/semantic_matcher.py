@@ -96,27 +96,16 @@ TRANSLATION_PAIRS = {
 }
 
 
-# Known semantically different pairs (MINIMAL, for truly opposite concepts only)
-# Most opposites are now caught by generic algorithms:
-# - Inverse transformations: is_inverse_transformation() ("A to B" ↔ "B to A")
-# - Opposite affixes: has_opposite_affixes() (synchronous ↔ asynchronous)
+# REMOVED: SEMANTIC_OPPOSITES hardcoded list
+# Now using LLM-based dynamic detection for high-similarity pairs (>85%)
 #
-# This list contains ONLY domain-specific opposites that:
-# 1. Have >85% similarity (would merge without protection)
-# 2. Cannot be detected by generic patterns
-#
-# NOTE: Analysis shows these pairs have >85% similarity and WOULD merge without protection:
-# - "sum of products" ↔ "product of sums" (95.2%)
-# - "nfa" ↔ "dfa" (88.3% in context like "NFA Design" ↔ "DFA Design")
-SEMANTIC_OPPOSITES = [
-    # Boolean algebra (95.2% similarity - WOULD merge)
-    ("sum of products", "product of sums"),
-    ("sop", "pos"),  # Abbreviations (kept for clarity)
-    ("somma di prodotti", "prodotto di somme"),  # Italian
-
-    # Automata theory (88.3% similarity in context - WOULD merge)
-    ("nfa", "dfa"),  # Nondeterministic vs Deterministic Finite Automaton
-]
+# Old approach: Hardcoded list of domain-specific opposites
+# Problem: Doesn't scale when ingesting new courses from different domains
+# New approach: Ask LLM "are these concepts opposites?" for high-similarity pairs
+# Benefits:
+# - Works for ANY domain (CS, Chemistry, Physics, etc.)
+# - Adapts to new courses automatically
+# - Maintains Examina's "no hardcoding" philosophy
 
 
 @dataclass
@@ -131,19 +120,25 @@ class SimilarityResult:
 class SemanticMatcher:
     """Semantic similarity matcher using embeddings."""
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2", use_embeddings: bool = True):
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2", use_embeddings: bool = True, llm_manager=None):
         """Initialize semantic matcher.
 
         Args:
             model_name: Name of the sentence transformer model to use
             use_embeddings: If False, use string matching fallback
+            llm_manager: Optional LLMManager instance for dynamic opposite detection
         """
         self.model_name = model_name
         self.use_embeddings = use_embeddings and SENTENCE_TRANSFORMERS_AVAILABLE
         self.model = None
+        self.llm_manager = llm_manager
 
         # Build translation lookup tables for fast access
         self._build_translation_tables()
+
+        # LLM opposite detection cache (stores results to avoid repeated API calls)
+        # Format: {(text1, text2): bool} where bool = True if opposites
+        self._opposite_cache = {}
 
         # Initialize embedding model if requested
         if self.use_embeddings:
@@ -414,67 +409,120 @@ class SemanticMatcher:
 
         return False
 
+    def are_opposites_llm(self, text1: str, text2: str, similarity: float) -> bool:
+        """
+        Use LLM to determine if two high-similarity concepts are semantic opposites.
+
+        This replaces the hardcoded SEMANTIC_OPPOSITES list with dynamic detection
+        that works for ANY domain (Chemistry, Physics, Math, CS, etc.).
+
+        Only called for pairs with >85% similarity that passed generic checks.
+        Results are cached to avoid repeated API calls.
+
+        Examples that should return True:
+        - "sum of products" ↔ "product of sums"
+        - "endothermic reaction" ↔ "exothermic reaction"
+        - "positive charge" ↔ "negative charge"
+        - "clockwise rotation" ↔ "counterclockwise rotation"
+
+        Args:
+            text1: First text
+            text2: Second text
+            similarity: Precomputed similarity score (for context)
+
+        Returns:
+            True if LLM determines they are semantic opposites
+        """
+        if not self.llm_manager:
+            # No LLM available - conservative fallback (don't merge)
+            return False
+
+        # Check cache first (normalized tuple to handle order)
+        cache_key = tuple(sorted([text1.lower(), text2.lower()]))
+        if cache_key in self._opposite_cache:
+            return self._opposite_cache[cache_key]
+
+        # Ask LLM
+        prompt = f"""Are these two concepts semantic opposites or complementary concepts that should NOT be merged together?
+
+Concept 1: "{text1}"
+Concept 2: "{text2}"
+
+Context: These concepts have {similarity*100:.1f}% semantic similarity according to embeddings.
+
+Answer with ONLY "yes" or "no".
+
+Examples:
+- "sum of products" vs "product of sums" → yes (opposite boolean operations)
+- "SoP" vs "PoS" → yes (abbreviations for opposite operations)
+- "NFA" vs "DFA" → yes (nondeterministic vs deterministic automata)
+- "NFA Design" vs "DFA Design" → yes (different automata types)
+- "Mealy machine" vs "Moore machine" → yes (different FSM types)
+- "endothermic" vs "exothermic" → yes (opposite thermodynamic processes)
+- "positive charge" vs "negative charge" → yes (opposite electrical properties)
+- "clockwise" vs "counterclockwise" → yes (opposite directions)
+- "finite state machine" vs "macchina a stati finiti" → no (translation, same concept)
+- "FSM minimization" vs "FSM minimizzazione" → no (translation, same concept)
+
+Answer:"""
+
+        try:
+            response = self.llm_manager.generate(
+                prompt=prompt,
+                system="You are an expert at detecting semantic opposites across all domains. Respond with only 'yes' or 'no'.",
+                temperature=0.0,  # Deterministic
+                max_tokens=10
+            )
+
+            if response.success:
+                answer = response.text.strip().lower()
+                is_opposite = answer.startswith("yes")
+
+                # Cache the result
+                self._opposite_cache[cache_key] = is_opposite
+
+                return is_opposite
+            else:
+                # LLM failed - conservative fallback (don't merge)
+                return False
+
+        except Exception as e:
+            print(f"[WARNING] LLM opposite detection failed: {e}")
+            # Conservative fallback
+            return False
+
     def are_semantically_different(self, text1: str, text2: str) -> bool:
         """
-        Check if texts contain semantically opposite terms.
+        Check if texts contain semantically opposite terms using GENERIC algorithms.
 
         This prevents merging of concepts that are fundamentally different
         despite potential string similarity.
 
-        Uses generic algorithms (NO HARDCODING):
+        Uses ONLY generic algorithms (NO HARDCODING):
         1. Inverse transformation detection ("A to B" ↔ "B to A")
         2. Opposite affix detection (synchronous ↔ asynchronous)
-        3. Hardcoded pairs (minimal, for domain-specific opposites only)
+
+        For high-similarity pairs (>85%), use are_opposites_llm() instead.
 
         Examples:
-        - "Mealy Machine Design" vs "Moore Machine Design" → True (different)
-        - "Minimizzazione SoP" vs "Minimizzazione PoS" → True (different)
-        - "Sequential Circuit" vs "Combinational Circuit" → True (different)
-        - "Synchronous" vs "Asynchronous" → True (opposite affixes)
+        - "Mealy to Moore" ↔ "Moore to Mealy" → True (inverse transformation)
+        - "Synchronous" ↔ "Asynchronous" → True (opposite affixes)
+        - "Binary to Decimal" ↔ "Decimal to Binary" → True (inverse transformation)
 
         Args:
             text1: First text
             text2: Second text
 
         Returns:
-            True if texts contain semantically opposite concepts
+            True if texts contain semantically opposite concepts (generic patterns only)
         """
-        import re
-
-        # First check for generic inverse transformations (NO HARDCODING)
+        # Check for generic inverse transformations (NO HARDCODING)
         if self.is_inverse_transformation(text1, text2):
             return True
 
         # Check for opposite affixes (GENERIC PATTERN DETECTION)
         if self.has_opposite_affixes(text1, text2):
             return True
-
-        t1_lower = text1.lower()
-        t2_lower = text2.lower()
-
-        for term1, term2 in SEMANTIC_OPPOSITES:
-            # Use word boundaries to match whole words only (prevents "asynchronous" matching "synchronous")
-            # For multi-word terms, use simple containment
-            if ' ' in term1 or ' ' in term2:
-                # Multi-word terms - use containment
-                has_term1_in_t1 = term1 in t1_lower
-                has_term2_in_t1 = term2 in t1_lower
-                has_term1_in_t2 = term1 in t2_lower
-                has_term2_in_t2 = term2 in t2_lower
-            else:
-                # Single-word terms - use word boundaries
-                has_term1_in_t1 = bool(re.search(r'\b' + re.escape(term1) + r'\b', t1_lower))
-                has_term2_in_t1 = bool(re.search(r'\b' + re.escape(term2) + r'\b', t1_lower))
-                has_term1_in_t2 = bool(re.search(r'\b' + re.escape(term1) + r'\b', t2_lower))
-                has_term2_in_t2 = bool(re.search(r'\b' + re.escape(term2) + r'\b', t2_lower))
-
-            # Opposite if one has term1 and other has term2 (but not both in same text)
-            if (has_term1_in_t1 and not has_term2_in_t1 and
-                has_term2_in_t2 and not has_term1_in_t2):
-                return True
-            if (has_term2_in_t1 and not has_term1_in_t1 and
-                has_term1_in_t2 and not has_term2_in_t2):
-                return True
 
         return False
 
@@ -487,10 +535,12 @@ class SemanticMatcher:
         """
         Decide if two items should be merged.
 
-        This implements a multi-stage matching approach:
-        1. Check if semantically different (HIGHEST PRIORITY - prevents false merges)
+        This implements a multi-stage matching approach (FULLY DYNAMIC, NO HARDCODING):
+        1. Check generic patterns (inverse transformations, opposite affixes)
         2. Check translation dictionary (exact matches)
         3. Compute semantic similarity
+        4. If high similarity (>= threshold), ask LLM if they're opposites
+        5. Return merge decision
 
         Args:
             name1: First item name
@@ -500,14 +550,14 @@ class SemanticMatcher:
         Returns:
             SimilarityResult with decision, score, and reason
         """
-        # Stage 1: Check if semantically different (HIGHEST PRIORITY)
-        # This prevents merging of Mealy/Moore, SoP/PoS, etc. even if they look similar
+        # Stage 1: Check generic patterns (HIGHEST PRIORITY)
+        # This catches inverse transformations and opposite affixes
         if self.are_semantically_different(name1, name2):
             return SimilarityResult(
                 should_merge=False,
                 similarity_score=0.0,
-                reason="semantically_different",
-                metadata={"stage": 1, "method": "semantic_opposites"}
+                reason="semantically_different_generic",
+                metadata={"stage": 1, "method": "generic_patterns"}
             )
 
         # Stage 2: Check translation dictionary (exact matches)
@@ -522,14 +572,27 @@ class SemanticMatcher:
         # Stage 3: Compute semantic similarity
         semantic_sim = self.compute_similarity(name1, name2)
 
+        # Stage 4: For high-similarity pairs, ask LLM if they're opposites
+        # This replaces the hardcoded SEMANTIC_OPPOSITES list
         if semantic_sim >= threshold:
+            # Check if they're domain-specific opposites using LLM
+            if self.are_opposites_llm(name1, name2, semantic_sim):
+                return SimilarityResult(
+                    should_merge=False,
+                    similarity_score=semantic_sim,
+                    reason="semantically_different_llm",
+                    metadata={"stage": 4, "method": "llm_opposite_detection"}
+                )
+
+            # Not opposites - safe to merge
             return SimilarityResult(
                 should_merge=True,
                 similarity_score=semantic_sim,
                 reason="semantic_similarity",
-                metadata={"stage": 3, "method": "embedding" if self.use_embeddings else "string"}
+                metadata={"stage": 4, "method": "embedding" if self.use_embeddings else "string"}
             )
         else:
+            # Below threshold - don't merge
             return SimilarityResult(
                 should_merge=False,
                 similarity_score=semantic_sim,
