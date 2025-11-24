@@ -36,15 +36,20 @@
   - Thread-safe with persistent caching
   - Works for ALL providers (anthropic, groq, ollama, openai, future)
   - CLI command: `examina rate-limits`
-- [x] **Analysis Performance Optimization (Phase 1)** ✅ (completed 2025-11-24)
-  - ✅ **Option 1 Complete**: Increased batch size (10 → 30)
-  - **Result**: 40% faster analysis (60s → 36-40s for 27 exercises)
-  - **Next options for further improvement**:
-    - **Option 2**: Async/await with asyncio - Medium effort, high gain (3-5x faster)
+- [x] **Analysis Performance Optimization** ✅ (completed 2025-11-24)
+  - ✅ **Option 1 Complete**: Increased batch size (10 → 30) - 40% faster
+  - ✅ **Option 2 Complete**: Async/await with asyncio - 1.1-5x faster (v0.13.0)
+    - Added async LLM methods (generate_async, aiohttp support)
+    - Converted analyzer to use asyncio.gather() for true concurrent I/O
+    - CLI flag: `--async-mode` (opt-in, backward compatible)
+    - Micro-benchmark: 5 parallel requests = 5x speedup
+    - Real-world: 27 exercises = 1.12x speedup (68.8s→61.4s with DeepSeek)
+    - Speedup varies: best with multiple batches, high-latency providers, rate limits
+  - **Remaining options for further improvement**:
     - **Option 3**: Procedure pattern caching - High effort, very high gain
     - **Option 4**: Stream processing pipeline - High effort, architectural change
-  - **Current performance**: ~0.7 ex/s (improved from 0.5 ex/s)
-  - **Target for next phase**: 2-3 ex/s (60-90s for 100 exercises)
+  - **Current performance**: 0.39-0.44 ex/s (27 exercises in 61-69s)
+  - **Analysis**: Modest real-world gain; consider Option 3 for larger improvement
 
 ### Phase 6 - Multi-Core-Loop Support
 - [x] **Clean up orphaned core loops** - ✅ Added `--clean-orphans` flag to deduplicate command
