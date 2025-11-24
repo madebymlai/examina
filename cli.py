@@ -4,6 +4,7 @@ Examina - AI-powered exam tutor system.
 CLI interface for managing courses, ingesting exams, and studying.
 """
 
+import asyncio
 import click
 import json
 from rich.console import Console
@@ -629,8 +630,377 @@ def ingest(course, zip_file, material_type, smart_split, provider, profile):
               help=f'Batch size for parallel processing (default: {Config.BATCH_SIZE})')
 @click.option('--monolingual', is_flag=True,
               help='Enable strictly monolingual mode - all procedures will be in single language (prevents cross-language duplicates)')
-def analyze(course, limit, provider, profile, lang, force, parallel, batch_size, monolingual):
+@click.option('--async-mode', 'use_async', is_flag=True, default=False,
+              help='Use async processing for better performance (requires async-compatible provider)')
+def analyze(course, limit, provider, profile, lang, force, parallel, batch_size, monolingual, use_async):
     """Analyze exercises with AI to discover topics and core loops."""
+    if use_async:
+        # Run async version
+        asyncio.run(analyze_async(course, limit, provider, profile, lang, force, parallel, batch_size, monolingual))
+    else:
+        # Run sync version
+        analyze_sync(course, limit, provider, profile, lang, force, parallel, batch_size, monolingual)
+
+
+async def analyze_async(course, limit, provider, profile, lang, force, parallel, batch_size, monolingual):
+    """Asynchronous analysis implementation."""
+    console.print(f"\n[bold cyan]Analyzing exercises for {course}...[/bold cyan]\n")
+    console.print(f"[dim]Using async mode for improved performance[/dim]\n")
+
+    try:
+        # Find course
+        with Database() as db:
+            all_courses = db.get_all_courses()
+            found_course = None
+            for c in all_courses:
+                if c['code'] == course or c['acronym'] == course:
+                    found_course = c
+                    break
+
+            if not found_course:
+                console.print(f"[red]Course '{course}' not found.[/red]\n")
+                return
+
+            course_code = found_course['code']
+            console.print(f"Course: {found_course['name']} ({found_course['acronym']})\n")
+
+            # Check for exercises and analyze resume capability
+            all_exercises = db.get_exercises_by_course(course_code)
+            if not all_exercises:
+                console.print("[yellow]No exercises found. Run 'examina ingest' first.[/yellow]\n")
+                return
+
+            analyzed_exercises = db.get_exercises_by_course(course_code, analyzed_only=True)
+            unanalyzed_exercises = db.get_exercises_by_course(course_code, unanalyzed_only=True)
+
+            # Display progress summary
+            total_count = len(all_exercises)
+            analyzed_count = len(analyzed_exercises)
+            remaining_count = len(unanalyzed_exercises)
+
+            console.print(f"Found {total_count} exercise fragments")
+            console.print(f"  [green]Already analyzed: {analyzed_count}[/green]")
+            console.print(f"  [yellow]Remaining: {remaining_count}[/yellow]\n")
+
+            # Determine which exercises to analyze
+            if force:
+                console.print("[yellow]--force flag: Re-analyzing all exercises[/yellow]\n")
+                exercises = all_exercises
+                # Reset analyzed flag for all exercises
+                db.conn.execute("UPDATE exercises SET analyzed = 0 WHERE course_code = ?", (course_code,))
+                db.conn.commit()
+            elif remaining_count == 0:
+                console.print("[green]All exercises already analyzed! Use --force to re-analyze.[/green]\n")
+                return
+            else:
+                if analyzed_count > 0:
+                    console.print(f"[cyan]Resuming analysis from checkpoint ({remaining_count} exercises remaining)...[/cyan]\n")
+                exercises = all_exercises  # Need all for proper merging context
+
+        # Determine provider to use (provider flag overrides profile routing)
+        effective_provider = provider
+        if provider is None and profile is not None:
+            # Use routing
+            from core.provider_router import ProviderRouter
+            from core.task_types import TaskType
+            try:
+                router = ProviderRouter()
+                effective_provider = router.route(TaskType.BULK_ANALYSIS, profile)
+                console.print(f"[dim]Using profile '{profile}' → provider: {effective_provider}[/dim]\n")
+            except Exception as e:
+                console.print(f"[yellow]Warning: Routing failed: {e}[/yellow]")
+                console.print(f"[dim]Falling back to default provider: {Config.LLM_PROVIDER}[/dim]\n")
+                effective_provider = Config.LLM_PROVIDER
+        elif provider is None:
+            # No provider or profile specified, use default
+            effective_provider = Config.LLM_PROVIDER
+
+        # Initialize components with async context manager
+        mode_str = f"language: {lang}, monolingual: {'ON' if monolingual else 'OFF'}"
+        console.print(f"🤖 Initializing AI components (provider: {effective_provider}, {mode_str})...")
+
+        async with LLMManager(provider=effective_provider) as llm:
+            analyzer = ExerciseAnalyzer(llm, language=lang, monolingual=monolingual)
+
+            # Initialize translation detector for language detection
+            from core.translation_detector import TranslationDetector
+            translation_detector = TranslationDetector(llm_manager=llm) if Config.LANGUAGE_DETECTION_ENABLED else None
+            if translation_detector:
+                console.print(f"   ✓ Language detection enabled\n")
+
+            # For embeddings, we still need Ollama (Groq/Anthropic don't provide embeddings)
+            embed_llm = LLMManager(provider="ollama") if effective_provider in ["groq", "anthropic"] else llm
+            vector_store = VectorStore(llm_manager=embed_llm)
+
+            # Check if provider is ready
+            if effective_provider == "ollama":
+                console.print(f"   Checking {llm.primary_model}...")
+                if not llm.check_model_available(llm.primary_model):
+                    console.print(f"[red]Model {llm.primary_model} not found![/red]")
+                    console.print(f"[yellow]Run: ollama pull {llm.primary_model}[/yellow]\n")
+                    return
+                console.print(f"   ✓ {llm.primary_model} ready\n")
+            elif effective_provider == "groq":
+                console.print(f"   Using Groq API with {llm.primary_model}")
+                if not Config.GROQ_API_KEY:
+                    console.print(f"[red]GROQ_API_KEY not set![/red]")
+                    console.print(f"[yellow]Get your free API key at: https://console.groq.com[/yellow]")
+                    console.print(f"[yellow]Then set it: export GROQ_API_KEY=your_key_here[/yellow]\n")
+                    return
+                console.print(f"   ✓ API key found\n")
+            elif provider == "anthropic":
+                console.print(f"   Using Anthropic API with {llm.primary_model}")
+                if not Config.ANTHROPIC_API_KEY:
+                    console.print(f"[red]ANTHROPIC_API_KEY not set![/red]")
+                    console.print(f"[yellow]Get your API key at: https://console.anthropic.com[/yellow]")
+                    console.print(f"[yellow]Then set it: export ANTHROPIC_API_KEY=your_key_here[/yellow]\n")
+                    return
+                console.print(f"   ✓ API key found\n")
+
+            # Limit for testing
+            if limit:
+                exercises = exercises[:limit]
+                console.print(f"[dim]Limited to {limit} exercises for testing[/dim]\n")
+
+            # Analyze and merge using async method
+            processing_mode = "async"
+            console.print(f"🔍 Analyzing and merging exercise fragments ({processing_mode} mode)...")
+            batch_size_msg = batch_size if batch_size else Config.BATCH_SIZE
+            console.print(f"[dim]Using batch size: {batch_size_msg}[/dim]")
+            console.print("[dim]This may take a while...[/dim]\n")
+
+            # Determine if we should skip analyzed exercises
+            skip_analyzed = not force and analyzed_count > 0
+
+            # Use async discovery method
+            discovery_result = await analyzer.discover_topics_and_core_loops_async(
+                course_code,
+                batch_size=batch_size or Config.BATCH_SIZE,
+                skip_analyzed=skip_analyzed
+            )
+
+            # Show progress summary
+            if skip_analyzed:
+                newly_analyzed = discovery_result['merged_count']
+                console.print(f"✓ Analyzed {newly_analyzed} new exercises (skipped {analyzed_count} already analyzed)")
+                console.print(f"  Total progress: {analyzed_count + newly_analyzed}/{total_count} exercises\n")
+            else:
+                console.print(f"✓ Merged {discovery_result['original_count']} fragments → {discovery_result['merged_count']} exercises\n")
+
+            # Display results
+            topics = discovery_result['topics']
+            core_loops = discovery_result['core_loops']
+
+            if topics:
+                console.print("[bold]📚 Discovered Topics:[/bold]")
+                for topic_name, topic_data in topics.items():
+                    console.print(f"  • {topic_name} ({topic_data['exercise_count']} exercises, {len(topic_data['core_loops'])} core loops)")
+
+            if core_loops:
+                console.print(f"\n[bold]🔄 Discovered Core Loops:[/bold]")
+                for loop_id, loop_data in core_loops.items():
+                    console.print(f"  • {loop_data['name']} ({loop_data['exercise_count']} exercises)")
+                    if loop_data['procedure']:
+                        console.print(f"    [dim]Steps: {len(loop_data['procedure'])}[/dim]")
+
+            # Store in database
+            console.print(f"\n💾 Storing analysis results...")
+            with Database() as db:
+                # Get topic name mapping from analyzer (for deduplication)
+                topic_name_mapping = getattr(analyzer, 'topic_name_mapping', {})
+
+                # Store topics (with language detection)
+                for topic_name in topics.keys():
+                    # Detect language if translation detector is available
+                    topic_language = None
+                    if monolingual and analyzer.primary_language:
+                        # In monolingual mode, use the detected primary language
+                        topic_language = analyzer.primary_language
+                    elif translation_detector:
+                        topic_language = translation_detector.detect_language(topic_name)
+                        if topic_language == "unknown":
+                            topic_language = None  # Store NULL instead of "unknown"
+
+                    topic_id = db.add_topic(course_code, topic_name, language=topic_language)
+
+                # Store core loops (with language detection)
+                for loop_id, loop_data in core_loops.items():
+                    # Get topic_id
+                    topic_name = loop_data.get('topic')
+                    if topic_name:
+                        # Map topic name to canonical name (if deduplicated)
+                        canonical_topic_name = topic_name
+                        if canonical_topic_name in topic_name_mapping:
+                            canonical_topic_name = topic_name_mapping[canonical_topic_name]
+
+                        topic_rows = db.get_topics_by_course(course_code)
+                        topic_id = next((t['id'] for t in topic_rows if t['name'] == canonical_topic_name), None)
+
+                        if topic_id:
+                            # Detect language if translation detector is available
+                            loop_language = None
+                            if monolingual and analyzer.primary_language:
+                                # In monolingual mode, use the detected primary language
+                                loop_language = analyzer.primary_language
+                            elif translation_detector:
+                                loop_language = translation_detector.detect_language(loop_data['name'])
+                                if loop_language == "unknown":
+                                    loop_language = None  # Store NULL instead of "unknown"
+
+                            db.add_core_loop(
+                                loop_id=loop_id,
+                                topic_id=topic_id,
+                                name=loop_data['name'],
+                                procedure=loop_data['procedure'],
+                                description=None,
+                                language=loop_language
+                            )
+
+                # Get core loop ID mapping from analyzer (for deduplication)
+                core_loop_id_mapping = getattr(analyzer, 'core_loop_id_mapping', {})
+
+                # Update exercises with analysis
+                for merged_ex in discovery_result['merged_exercises']:
+                    # Update first exercise in merged group
+                    first_id = merged_ex['merged_from'][0]
+
+                    # Check if this exercise was skipped due to low confidence
+                    if merged_ex.get('low_confidence_skipped'):
+                        db.conn.execute("""
+                            UPDATE exercises
+                            SET analyzed = 1, low_confidence_skipped = 1
+                            WHERE id = ?
+                        """, (first_id,))
+                        continue
+
+                    analysis = merged_ex.get('analysis')
+                    if analysis and analysis.topic:
+                        # Map topic name to canonical name (if deduplicated)
+                        canonical_topic_name = analysis.topic
+                        if canonical_topic_name in topic_name_mapping:
+                            canonical_topic_name = topic_name_mapping[canonical_topic_name]
+
+                        # Get topic_id
+                        topic_rows = db.get_topics_by_course(course_code)
+                        topic_id = next((t['id'] for t in topic_rows if t['name'] == canonical_topic_name), None)
+
+                        # Get primary core_loop_id (first procedure) for backward compatibility
+                        primary_core_loop_id = analysis.core_loop_id
+                        if primary_core_loop_id and primary_core_loop_id in core_loop_id_mapping:
+                            primary_core_loop_id = core_loop_id_mapping[primary_core_loop_id]
+
+                        # Only update if primary_core_loop_id exists in deduplicated core_loops OR database
+                        if primary_core_loop_id and primary_core_loop_id not in core_loops:
+                            # Check if it exists in database (may have been deduplicated to existing DB entry)
+                            if not db.get_core_loop(primary_core_loop_id):
+                                print(f"[DEBUG] Skipping exercise {first_id[:20]}... - core_loop_id '{primary_core_loop_id}' not found in deduplicated core_loops or database")
+                                primary_core_loop_id = None
+
+                        # Collect tags for flexible search
+                        tags = []
+
+                        # Process ALL procedures - link to junction table
+                        if analysis.procedures:
+                            for procedure_info in analysis.procedures:
+                                proc_core_loop_id = AnalysisResult._normalize_core_loop_id(procedure_info.name)
+
+                                # Map to canonical ID if deduplicated
+                                if proc_core_loop_id and proc_core_loop_id in core_loop_id_mapping:
+                                    proc_core_loop_id = core_loop_id_mapping[proc_core_loop_id]
+
+                                # Link exercise to core loop via junction table (check both new loops and DB)
+                                if proc_core_loop_id and (proc_core_loop_id in core_loops or db.get_core_loop(proc_core_loop_id)):
+                                    db.link_exercise_to_core_loop(
+                                        exercise_id=first_id,
+                                        core_loop_id=proc_core_loop_id,
+                                        step_number=procedure_info.point_number
+                                    )
+
+                                    # Collect tags
+                                    tags.append(procedure_info.type)
+                                    if procedure_info.transformation:
+                                        src = procedure_info.transformation.get('source_format', '').lower().replace(' ', '_')
+                                        tgt = procedure_info.transformation.get('target_format', '').lower().replace(' ', '_')
+                                        tags.append(f"transform_{src}_to_{tgt}")
+
+                        # Update exercise with primary core loop and metadata
+                        db.update_exercise_analysis(
+                            exercise_id=first_id,
+                            topic_id=topic_id,
+                            core_loop_id=primary_core_loop_id,
+                            difficulty=analysis.difficulty,
+                            variations=analysis.variations,
+                            analyzed=True
+                        )
+
+                        # Update tags
+                        if tags:
+                            db.update_exercise_tags(first_id, list(set(tags)))
+
+                        # Phase 9.2: Update theory metadata if present
+                        if analysis.exercise_type in ['theory', 'proof', 'hybrid']:
+                            db.update_exercise_theory_metadata(
+                                exercise_id=first_id,
+                                exercise_type=analysis.exercise_type,
+                                theory_category=analysis.theory_category,
+                                theorem_name=analysis.theorem_name,
+                                concept_id=analysis.concept_id,
+                                prerequisite_concepts=analysis.prerequisite_concepts,
+                                theory_metadata=analysis.theory_metadata
+                            )
+
+                db.conn.commit()
+                console.print("   ✓ Stored in database\n")
+
+            # Build vector store
+            console.print("🧠 Building vector embeddings for RAG...")
+            vector_store.add_exercises_batch(course_code, discovery_result['merged_exercises'])
+
+            # Add core loops to vector store
+            for loop_id, loop_data in core_loops.items():
+                vector_store.add_core_loop(
+                    course_code=course_code,
+                    core_loop_id=loop_id,
+                    name=loop_data['name'],
+                    description=loop_data.get('description', ''),
+                    procedure=loop_data['procedure'],
+                    example_exercises=loop_data['exercises']
+                )
+
+            stats = vector_store.get_collection_stats(course_code)
+            console.print(f"   ✓ {stats.get('exercises_count', 0)} exercise embeddings")
+            console.print(f"   ✓ {stats.get('procedures_count', 0)} procedure embeddings\n")
+
+            # Show cache statistics
+            cache_stats = llm.get_cache_stats()
+            if cache_stats['total_requests'] > 0:
+                console.print("📊 Cache Statistics:")
+                console.print(f"   Cache hits: {cache_stats['cache_hits']}")
+                console.print(f"   Cache misses: {cache_stats['cache_misses']}")
+                console.print(f"   Hit rate: {cache_stats['hit_rate_percent']}%")
+                if cache_stats['cache_hits'] > 0:
+                    console.print(f"   [green]💰 Saved ~{cache_stats['cache_hits']} API calls![/green]\n")
+                else:
+                    console.print(f"   [dim]Run analyze again to see cache benefits[/dim]\n")
+
+            # Summary
+            console.print("[bold green]✨ Analysis complete![/bold green]\n")
+            console.print(f"Topics: {len(topics)}")
+            console.print(f"Core loops: {len(core_loops)}")
+            console.print(f"Exercises: {discovery_result['merged_count']}\n")
+            console.print(f"Next steps:")
+            console.print(f"  • examina info --course {course} - View updated course info")
+            console.print(f"  • examina learn --course {course} - Start learning (Phase 4)\n")
+
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}\n")
+        import traceback
+        traceback.print_exc()
+        raise click.Abort()
+
+
+def analyze_sync(course, limit, provider, profile, lang, force, parallel, batch_size, monolingual):
+    """Synchronous analysis implementation."""
     console.print(f"\n[bold cyan]Analyzing exercises for {course}...[/bold cyan]\n")
 
     try:

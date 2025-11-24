@@ -6,6 +6,7 @@ Handles exercise merging, topic discovery, and core loop identification.
 import json
 import re
 import time
+import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -708,6 +709,136 @@ No markdown code blocks, just JSON."""
         print(f"  All retries failed: {last_error}")
         return self._default_analysis_result()
 
+    async def _analyze_exercise_with_retry_async(self, exercise_text: str, course_name: str,
+                                                  previous_exercise: Optional[str] = None,
+                                                  max_retries: int = 2) -> AnalysisResult:
+        """Analyze exercise asynchronously with retry logic for failed API calls.
+
+        Args:
+            exercise_text: Exercise text
+            course_name: Course name for context
+            previous_exercise: Previous exercise text (for merge detection)
+            max_retries: Maximum number of retries on failure
+
+        Returns:
+            AnalysisResult with classification
+        """
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                # Build prompt
+                prompt = self._build_analysis_prompt(
+                    exercise_text, course_name, previous_exercise
+                )
+
+                # Call LLM asynchronously
+                response = await self.llm.generate_async(
+                    prompt=prompt,
+                    model=self.llm.primary_model,
+                    temperature=0.3,
+                    json_mode=True
+                )
+
+                if not response.success:
+                    # Log error and retry or return default
+                    if attempt < max_retries:
+                        print(f"  Retry {attempt + 1}/{max_retries} for exercise (error: {response.error})...")
+                        await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff
+                        continue
+                    print(f"[ERROR] LLM failed for exercise: {response.error}")
+                    print(f"  Text preview: {exercise_text[:100]}...")
+                    return self._default_analysis_result()
+
+                # Parse JSON response
+                data = self.llm.parse_json_response(response)
+                if not data:
+                    if attempt < max_retries:
+                        print(f"  Retry {attempt + 1}/{max_retries} for exercise (invalid JSON)...")
+                        await asyncio.sleep(1 * (attempt + 1))
+                        continue
+                    return self._default_analysis_result()
+
+                # Parse procedures (new format) or fallback to old format
+                procedures = []
+                if "procedures" in data and data["procedures"]:
+                    # New format: multiple procedures
+                    for proc_data in data["procedures"]:
+                        procedures.append(ProcedureInfo(
+                            name=proc_data.get("name", "Unknown Procedure"),
+                            type=proc_data.get("type", "other"),
+                            steps=proc_data.get("steps", []),
+                            point_number=proc_data.get("point_number"),
+                            transformation=proc_data.get("transformation")
+                        ))
+                elif "core_loop_name" in data and data["core_loop_name"]:
+                    # Old format: single procedure - convert to new format
+                    procedures.append(ProcedureInfo(
+                        name=data["core_loop_name"],
+                        type="other",
+                        steps=data.get("procedure", []),
+                        point_number=None,
+                        transformation=None
+                    ))
+
+                # Normalize procedures to primary language if monolingual mode enabled
+                if self.monolingual and procedures:
+                    procedures = self._normalize_procedures_to_primary_language(procedures)
+
+                # Phase 9.1: Extract exercise type information
+                exercise_type = data.get("exercise_type", "procedural")
+                type_confidence = data.get("type_confidence", 0.5)
+                proof_keywords = data.get("proof_keywords", [])
+                theory_metadata = data.get("theory_metadata")
+
+                # Phase 9.2: Extract theory categorization information
+                theory_category = data.get("theory_category")
+                theorem_name = data.get("theorem_name")
+                concept_id = data.get("concept_id")
+                prerequisite_concepts = data.get("prerequisite_concepts")
+
+                # Build result
+                result = AnalysisResult(
+                    is_valid_exercise=data.get("is_valid_exercise", True),
+                    is_fragment=data.get("is_fragment", False),
+                    should_merge_with_previous=data.get("should_merge_with_previous", False),
+                    topic=data.get("topic"),
+                    difficulty=data.get("difficulty"),
+                    variations=data.get("variations", []),
+                    confidence=data.get("confidence", 0.5),
+                    procedures=procedures,
+                    exercise_type=exercise_type,
+                    type_confidence=type_confidence,
+                    proof_keywords=proof_keywords if proof_keywords else None,
+                    theory_metadata=theory_metadata,
+                    theory_category=theory_category,
+                    theorem_name=theorem_name,
+                    concept_id=concept_id,
+                    prerequisite_concepts=prerequisite_concepts
+                )
+
+                # Check if analysis was successful
+                if result.confidence > 0.0 or result.topic is not None:
+                    return result
+
+                # If we got default result, retry
+                if attempt < max_retries:
+                    print(f"  Retry {attempt + 1}/{max_retries} for exercise (low confidence)...")
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+
+                return result
+
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    print(f"  Error on attempt {attempt + 1}: {str(e)}, retrying...")
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+
+        # All retries failed, return default
+        print(f"  All retries failed: {last_error}")
+        return self._default_analysis_result()
+
     def merge_exercises_parallel(self, exercises: List[Dict[str, Any]],
                                  batch_size: Optional[int] = None,
                                  show_progress: bool = True,
@@ -805,6 +936,166 @@ No markdown code blocks, just JSON."""
         elapsed_time = time.time() - start_time
 
         print(f"[INFO] Batch analysis complete in {elapsed_time:.1f}s")
+        print(f"  Processed: {processed}/{total} exercises")
+        if skipped_count > 0:
+            print(f"  Skipped (already analyzed): {skipped_count} exercises")
+        print(f"  Failed: {failed_count} exercises")
+        print(f"  Rate: {processed/elapsed_time:.1f} exercises/second")
+
+        # Now merge exercises sequentially based on analysis results
+        print(f"[INFO] Merging exercise fragments...")
+        merged = []
+        current_merge = None
+
+        for i, exercise in enumerate(exercises):
+            # Check if skipped
+            if i not in analysis_results:
+                if current_merge:
+                    merged.append(current_merge)
+                    current_merge = None
+                continue
+
+            analysis = analysis_results[i]
+
+            # Skip invalid exercises
+            if not analysis.is_valid_exercise:
+                print(f"[DEBUG] Skipping invalid exercise: {exercise['id'][:20]}... ({exercise['text'][:60]}...)")
+                continue
+
+            # Should merge with previous?
+            if analysis.should_merge_with_previous and current_merge:
+                # Merge into current
+                current_merge["text"] += "\n\n" + exercise["text"]
+                current_merge["merged_from"].append(exercise["id"])
+                if exercise.get("image_paths"):
+                    if not current_merge.get("image_paths"):
+                        current_merge["image_paths"] = []
+                    current_merge["image_paths"].extend(exercise["image_paths"])
+            else:
+                # Save previous merge if exists
+                if current_merge:
+                    merged.append(current_merge)
+
+                # Start new exercise
+                current_merge = {
+                    **exercise,
+                    "merged_from": [exercise["id"]],
+                    "analysis": analysis
+                }
+
+        # Don't forget last one
+        if current_merge:
+            merged.append(current_merge)
+
+        print(f"[INFO] Merged {len(exercises)} fragments → {len(merged)} complete exercises")
+
+        return merged
+
+    async def merge_exercises_async(self, exercises: List[Dict[str, Any]],
+                                    batch_size: Optional[int] = None,
+                                    show_progress: bool = True,
+                                    skip_analyzed: bool = False) -> List[Dict[str, Any]]:
+        """Merge exercise fragments using async batch processing.
+
+        This method analyzes exercises in async batches to improve performance.
+        Each batch is processed concurrently using asyncio.gather(), with retry logic for failed exercises.
+
+        Args:
+            exercises: List of exercise dicts from database
+            batch_size: Number of exercises to process concurrently (defaults to Config.BATCH_SIZE)
+            show_progress: Show progress bar during processing
+            skip_analyzed: If True, skip exercises already marked as analyzed
+
+        Returns:
+            List of merged exercises
+        """
+        if not exercises:
+            return []
+
+        batch_size = batch_size or Config.BATCH_SIZE
+        total = len(exercises)
+
+        print(f"[INFO] Starting async batch analysis of {total} exercises (batch_size={batch_size})...")
+        start_time = time.time()
+
+        # Store analysis results indexed by exercise position
+        analysis_results = {}
+
+        # Process in batches
+        async def analyze_single(index: int, exercise: Dict[str, Any], prev_text: Optional[str]) -> tuple:
+            """Analyze a single exercise and return (index, analysis, error)."""
+            try:
+                # Skip already analyzed if requested
+                if skip_analyzed and exercise.get('analyzed'):
+                    return (index, None, None)  # Signal to skip
+
+                analysis = await self._analyze_exercise_with_retry_async(
+                    exercise["text"],
+                    "Computer Architecture",  # TODO: get from exercise
+                    prev_text
+                )
+                return (index, analysis, None)
+            except Exception as e:
+                print(f"  [ERROR] Failed to analyze exercise {index}: {str(e)}")
+                return (index, self._default_analysis_result(), str(e))
+
+        # Process exercises in batches with asyncio.gather()
+        processed = 0
+        failed_count = 0
+        skipped_count = 0
+
+        for batch_start in range(0, total, batch_size):
+            batch_end = min(batch_start + batch_size, total)
+            batch = exercises[batch_start:batch_end]
+            batch_indices = list(range(batch_start, batch_end))
+
+            if show_progress:
+                print(f"  Processing batch {batch_start//batch_size + 1}/{(total + batch_size - 1)//batch_size} (exercises {batch_start+1}-{batch_end}/{total})...")
+
+            # Prepare analysis tasks for this batch
+            tasks = []
+            for idx, exercise in zip(batch_indices, batch):
+                # Determine previous exercise text for merge detection
+                prev_text = None
+                if idx > 0:
+                    prev_text = exercises[idx - 1].get("text")
+
+                task = analyze_single(idx, exercise, prev_text)
+                tasks.append(task)
+
+            # Run all tasks concurrently
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results
+            for result in results:
+                if isinstance(result, Exception):
+                    # Task raised an exception
+                    print(f"  [ERROR] Task failed with exception: {result}")
+                    failed_count += 1
+                    processed += 1
+                    continue
+
+                idx, analysis, error = result
+
+                if analysis is None:  # Skipped exercise
+                    skipped_count += 1
+                else:
+                    analysis_results[idx] = analysis
+
+                processed += 1
+
+                if error:
+                    failed_count += 1
+
+                if show_progress and processed % 5 == 0:
+                    elapsed = time.time() - start_time
+                    rate = processed / elapsed if elapsed > 0 else 0
+                    eta = (total - processed) / rate if rate > 0 else 0
+                    print(f"    Progress: {processed}/{total} ({100*processed/total:.1f}%) | {rate:.1f} ex/s | ETA: {eta:.0f}s")
+
+        elapsed_time = time.time() - start_time
+
+        print(f"[INFO] Async batch analysis complete in {elapsed_time:.1f}s")
         print(f"  Processed: {processed}/{total} exercises")
         if skipped_count > 0:
             print(f"  Skipped (already analyzed): {skipped_count} exercises")
@@ -966,6 +1257,125 @@ No markdown code blocks, just JSON."""
                 topic_data["core_loops"] = list(topic_data["core_loops"])
 
             # Deduplicate against existing database entries first, then within batch
+            topics = self._deduplicate_topics_with_database(topics, course_code, db)
+            core_loops = self._deduplicate_core_loops_with_database(core_loops, course_code, db)
+
+            # Log summary statistics
+            accepted_count = len(merged_exercises) - low_confidence_count
+            if low_confidence_count > 0:
+                print(f"\n[SUMMARY] Confidence Filtering Results:")
+                print(f"  Total merged exercises: {len(merged_exercises)}")
+                print(f"  Accepted (>= {Config.MIN_ANALYSIS_CONFIDENCE} confidence): {accepted_count}")
+                print(f"  Skipped (low confidence): {low_confidence_count}")
+                print(f"  Skip rate: {(low_confidence_count / len(merged_exercises) * 100):.1f}%\n")
+
+            return {
+                "topics": topics,
+                "core_loops": core_loops,
+                "merged_exercises": merged_exercises,
+                "original_count": len(exercises),
+                "merged_count": len(merged_exercises),
+                "low_confidence_skipped": low_confidence_count,
+                "accepted_count": accepted_count
+            }
+
+    async def discover_topics_and_core_loops_async(self, course_code: str,
+                                                   batch_size: int = 10,
+                                                   skip_analyzed: bool = False) -> Dict[str, Any]:
+        """Discover topics and core loops for a course using async processing.
+
+        Args:
+            course_code: Course code
+            batch_size: Number of exercises to analyze at once
+            skip_analyzed: If True, skip already analyzed exercises
+
+        Returns:
+            Dict with topics and core loops discovered
+        """
+        with Database() as db:
+            # Get all exercises for course
+            exercises = db.get_exercises_by_course(course_code)
+
+            if not exercises:
+                return {"topics": {}, "core_loops": {}}
+
+            # Detect primary language if monolingual mode enabled
+            if self.monolingual and not self.primary_language:
+                course = db.get_course(course_code)
+                course_name = course['name'] if course else course_code
+                self.primary_language = self._detect_primary_language(exercises, course_name)
+                print(f"[MONOLINGUAL MODE] Primary language set to: {self.primary_language}")
+                print(f"  All procedures will be normalized to {self.primary_language}\n")
+
+            # Merge fragments using async processing
+            merged_exercises = await self.merge_exercises_async(
+                exercises,
+                batch_size=batch_size,
+                skip_analyzed=skip_analyzed
+            )
+
+            # Collect all analyses (sync processing of results)
+            topics = {}
+            core_loops = {}
+            low_confidence_count = 0
+
+            for merged_ex in merged_exercises:
+                analysis = merged_ex.get("analysis")
+                if not analysis:
+                    continue
+
+                # Skip low-confidence analyses
+                if analysis.confidence < Config.MIN_ANALYSIS_CONFIDENCE:
+                    low_confidence_count += 1
+                    print(f"[INFO] Skipping exercise due to low confidence ({analysis.confidence:.2f} < {Config.MIN_ANALYSIS_CONFIDENCE}): {merged_ex['id'][:40]}...")
+                    merged_ex["low_confidence_skipped"] = True
+                    continue
+
+                # Track topic (same logic as sync version)
+                if analysis.topic:
+                    if analysis.topic not in topics:
+                        topics[analysis.topic] = {
+                            "name": analysis.topic,
+                            "exercise_count": 0,
+                            "core_loops": set()
+                        }
+                    topics[analysis.topic]["exercise_count"] += 1
+
+                # Process ALL procedures
+                if analysis.procedures:
+                    if len(analysis.procedures) > 1:
+                        print(f"[INFO] Multiple procedures detected ({len(analysis.procedures)}) in exercise {merged_ex['id'][:40]}:")
+                        for i, proc in enumerate(analysis.procedures, 1):
+                            print(f"  {i}. {proc.name} (type: {proc.type}, point: {proc.point_number})")
+
+                    for procedure_info in analysis.procedures:
+                        core_loop_id = self._normalize_core_loop_id(procedure_info.name)
+
+                        # Track core loop under topic
+                        if analysis.topic and core_loop_id:
+                            topics[analysis.topic]["core_loops"].add(core_loop_id)
+
+                        # Track core loop
+                        if core_loop_id and procedure_info.name:
+                            if core_loop_id not in core_loops:
+                                core_loops[core_loop_id] = {
+                                    "id": core_loop_id,
+                                    "name": procedure_info.name,
+                                    "topic": analysis.topic,
+                                    "procedure": procedure_info.steps or [],
+                                    "type": procedure_info.type,
+                                    "transformation": procedure_info.transformation,
+                                    "exercise_count": 0,
+                                    "exercises": []
+                                }
+                            core_loops[core_loop_id]["exercise_count"] += 1
+                            core_loops[core_loop_id]["exercises"].append(merged_ex["id"])
+
+            # Convert sets to lists for JSON serialization
+            for topic_data in topics.values():
+                topic_data["core_loops"] = list(topic_data["core_loops"])
+
+            # Deduplicate against existing database entries
             topics = self._deduplicate_topics_with_database(topics, course_code, db)
             core_loops = self._deduplicate_core_loops_with_database(core_loops, course_code, db)
 
