@@ -102,6 +102,12 @@ Examina works with **any course material containing problems and exercises**:
 - Full Italian/English support
 - Bilingual deduplication (merges "Finite State Machine" ↔ "Macchina a Stati Finiti")
 
+### ⚡ Performance
+- **Procedure pattern caching** - 100% cache hit rate on re-analysis
+- **Async/await analysis** - 1.1-5x faster with concurrent LLM calls
+- **26+ exercises/second** with cached patterns
+- **Batch processing** - Optimized for bulk analysis
+
 ## Commands Reference
 
 ### Course Management
@@ -184,6 +190,11 @@ python3 cli.py deduplicate --course B006802 --dry-run
 
 # Split generic topics
 python3 cli.py split-topics --course B006802 --dry-run
+
+# Manage procedure cache (for faster re-analysis)
+python3 cli.py pattern-cache --stats           # View cache stats
+python3 cli.py pattern-cache --build           # Build cache from analyzed exercises
+python3 cli.py pattern-cache --clear           # Clear cache entries
 ```
 
 ## Configuration
@@ -237,14 +248,12 @@ export EXAMINA_SEMANTIC_MATCHING=1
 - ✅ Automatic topic splitting
 - ✅ Theory & proof support
 - ✅ Bilingual deduplication
-
-**In Progress:**
-- 🚧 Enhanced learning system (metacognitive strategies)
+- ✅ Procedure pattern caching (v0.14.0)
+- ✅ Async/await analysis pipeline (v0.13.0)
 
 **Planned:**
-- 📋 Exam files with solutions parsing
-- 📋 Orphaned core loops cleanup
 - 📋 Adaptive teaching based on mastery
+- 📋 Web application interface
 
 See [TODO.md](TODO.md) for detailed task list and [CHANGELOG.md](CHANGELOG.md) for version history.
 
@@ -259,7 +268,8 @@ Examina/
 │   ├── tutor.py        # AI teaching
 │   ├── quiz_engine.py  # Quiz system
 │   ├── sm2.py          # Spaced repetition
-│   └── semantic_matcher.py  # Deduplication
+│   ├── semantic_matcher.py  # Deduplication
+│   └── procedure_cache.py   # Pattern caching
 ├── models/             # LLM integrations
 │   └── llm_manager.py  # Provider abstraction
 ├── storage/            # Data layer

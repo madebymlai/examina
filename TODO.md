@@ -39,20 +39,15 @@
 - [x] **Analysis Performance Optimization** ✅ (completed 2025-11-24)
   - ✅ **Option 1 Complete**: Increased batch size (10 → 30) - 40% faster
   - ✅ **Option 2 Complete**: Async/await with asyncio - 1.1-5x faster (v0.13.0)
-    - Added async LLM methods (generate_async, aiohttp support)
-    - Converted analyzer to use asyncio.gather() for true concurrent I/O
-    - CLI flag: `--async-mode` (opt-in, backward compatible)
-    - Micro-benchmark: 5 parallel requests = 5x speedup
-    - Real-world (DeepSeek, no rate limit): 1.12x speedup (68.8s→61.4s)
-    - Real-world (Groq, 30 req/min): 2.65x speedup (90.9s→34.3s)
-      - ⚠️ Groq has poor analysis quality (92-100% skip rate)
-      - Benchmark proves async helps with rate limits but don't use Groq for analysis
-    - **Validated**: Async benefits scale significantly with rate limits
-  - **Remaining options for further improvement**:
-    - **Option 3**: Procedure pattern caching - High effort, very high gain
+  - ✅ **Option 3 Complete**: Procedure pattern caching - 100% cache hit rate (v0.14.0)
+    - Embedding-based similarity matching with text validation
+    - Thread-safe for async/parallel analysis
+    - CLI command: `examina pattern-cache` (--stats, --build, --clear)
+    - 26.2 exercises/second with cached patterns
+  - **Remaining option for further improvement**:
     - **Option 4**: Stream processing pipeline - High effort, architectural change
-  - **Current performance**: 0.39-0.44 ex/s with DeepSeek (27 exercises in 61-69s)
-  - **Recommendation**: Use DeepSeek + `--async-mode` for best balance of speed and quality
+  - **Current performance**: 26+ ex/s with cache hits, 0.39-0.44 ex/s for new exercises
+  - **Recommendation**: Build cache first (`pattern-cache --build`), then analyze
 
 ### Phase 6 - Multi-Core-Loop Support
 - [x] **Clean up orphaned core loops** - ✅ Added `--clean-orphans` flag to deduplicate command

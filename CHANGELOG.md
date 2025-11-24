@@ -5,6 +5,49 @@ All notable changes and completed phases are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2025-11-24
+
+### Added - Procedure Pattern Caching (Option 3)
+- **Embedding-based procedure pattern caching** to avoid redundant LLM calls
+  - Two-stage matching: embedding similarity (0.9 threshold) + text validation (0.7 threshold)
+  - Pattern normalization for fuzzy matching across exercise variations
+  - Thread-safe operations for async/parallel analysis
+  - Web-ready with multi-tenant `user_id` isolation
+
+- **New CLI command: `pattern-cache`**
+  - `--stats` - View cache statistics (entries, hit rate, configuration)
+  - `--build` - Build cache from existing analyzed exercises
+  - `--clear` - Clear cache entries (with confirmation)
+  - `--course` - Filter by course code
+
+- **Configuration options** (via environment variables):
+  - `EXAMINA_PROCEDURE_CACHE_ENABLED` - Enable/disable caching (default: true)
+  - `EXAMINA_PROCEDURE_CACHE_EMBEDDING_THRESHOLD` - Embedding similarity threshold (default: 0.90)
+  - `EXAMINA_PROCEDURE_CACHE_TEXT_THRESHOLD` - Text validation threshold (default: 0.70)
+  - `EXAMINA_PROCEDURE_CACHE_MIN_CONFIDENCE` - Minimum confidence for caching (default: 0.85)
+
+### Performance
+- **100% cache hit rate** on re-analysis of previously analyzed exercises
+- **26.2 exercises/second** processing speed with cached patterns
+- **Zero LLM calls** for exercises matching cached patterns
+- Hybrid matching combines semantic embeddings with text validation for accuracy
+
+### Changed
+- `core/procedure_cache.py` (new, ~510 lines) - Core caching implementation
+- `storage/database.py` (+300 lines) - Cache schema, methods, migrations
+- `core/analyzer.py` (+112 lines) - Cache integration in analysis pipeline
+- `cli.py` (+309 lines) - `pattern-cache` command, stats display in analyze output
+- `config.py` (+20 lines) - Cache configuration constants
+- `core/semantic_matcher.py` (+13 lines) - Configurable embedding model
+
+### Technical Details
+- Database table: `procedure_cache_entries` with pattern hash, embeddings, and metadata
+- Automatic migration for existing databases (adds `user_id` column)
+- In-memory cache with numpy-based batch similarity computation
+- Graceful fallback to text-only matching when embeddings unavailable
+
+---
+
 ## [0.13.0] - 2025-11-24
 
 ### Added - Major Performance Enhancement
