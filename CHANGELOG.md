@@ -5,6 +5,39 @@ All notable changes and completed phases are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2025-11-24
+
+### Added
+- **Phase 7 - Metacognitive Learning System** (Core features completed)
+  - Research-backed learning strategies module (`core/metacognitive.py`)
+  - 4 problem-solving frameworks (Polya, IDEAL, Feynman, Rubber Duck)
+  - Context-aware study tips (preparation, during-study, after-study, metacognitive)
+  - Self-assessment prompts based on Bloom's taxonomy
+  - 5 retrieval practice techniques with timing optimization
+  - Adaptive to difficulty and mastery level
+
+- **Interactive Proof Practice Mode** (`prove` command)
+  - Step-by-step proof guidance with optional hints
+  - 5 proof techniques (direct, contradiction, induction, construction, contrapositive)
+  - Automatic technique suggestion
+  - Common mistakes warnings
+  - Full solution on demand
+  - Works with Phase 9 theory/proof exercises
+
+- **New ProofTutor methods:**
+  - `get_proof_guidance()` - Structured proof outline
+  - `get_hint_for_step()` - Progressive hints
+  - `get_full_proof()` - Complete rigorous solution
+
+### Fixed
+- Import error: `study_context` module path updated to `scripts/`
+
+### Benefits
+- ✅ Metacognitive strategies work for ANY domain (no hardcoding)
+- ✅ Interactive learning enhances engagement
+- ✅ Proof practice makes theory accessible
+- ✅ Research-backed techniques from cognitive science
+
 ## [0.10.0] - 2025-11-24
 
 ### Changed
