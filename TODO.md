@@ -17,6 +17,7 @@
 
 **Future Enhancements:**
 - [ ] Integrate metacognitive tips into `learn` command UI
+- [ ] Display separated solutions during learning (when available)
 - [ ] Adaptive teaching based on mastery level
 - [ ] Track student understanding per topic
 - [ ] Detect knowledge gaps and fill proactively
@@ -25,7 +26,11 @@
 ## High Priority Improvements
 
 ### Phase 3 - AI Analysis
-- [ ] **Handle exam files with solutions** - Parse PDFs that include both questions AND solutions in the same document (currently assumes questions-only format)
+- [x] **Handle exam files with solutions** ✅ - Implemented generic solution separator (`separate-solutions` command)
+  - LLM-based Q+A detection (works for any format/language)
+  - Automatic separation with confidence scoring
+  - Tested on SO course (10 Q+A detected, 4 separated successfully)
+  - Tested on ADE SOLUZIONI (correctly identified 16 question-only exercises)
 - [ ] Provider-agnostic rate limiting tracker
 
 ### Phase 6 - Multi-Core-Loop Support

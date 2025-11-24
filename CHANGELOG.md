@@ -29,8 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `get_hint_for_step()` - Progressive hints
   - `get_full_proof()` - Complete rigorous solution
 
+- **Generic Solution Separator** (`core/solution_separator.py`, `separate-solutions` command)
+  - LLM-based detection of Q+A vs question-only exercises
+  - Automatic separation of questions from solutions
+  - Works for ANY format (inline, appendix, interleaved)
+  - Works for ANY language (Italian, English, etc.)
+  - Works for ANY subject (no hardcoding)
+  - Confidence scoring and validation (>70% coverage threshold)
+  - Dry-run mode for safe testing
+  - Updates `exercises.solution` column automatically
+
 ### Fixed
 - Import error: `study_context` module path updated to `scripts/`
+- JSON parsing error: Strip markdown code fences from LLM responses before parsing
 
 ### Benefits
 - ✅ Metacognitive strategies work for ANY domain (no hardcoding)

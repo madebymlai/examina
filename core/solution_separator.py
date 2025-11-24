@@ -154,7 +154,20 @@ Guidelines:
         # Parse JSON response
         try:
             import json
-            result = json.loads(response.text)
+
+            # Strip markdown code fences if present
+            response_text = response.text.strip()
+            if response_text.startswith('```'):
+                # Remove opening fence (```json or ```)
+                lines = response_text.split('\n')
+                if lines[0].startswith('```'):
+                    lines = lines[1:]
+                # Remove closing fence (```)
+                if lines and lines[-1].strip() == '```':
+                    lines = lines[:-1]
+                response_text = '\n'.join(lines)
+
+            result = json.loads(response_text)
 
             question = result.get('question', '').strip()
             answer = result.get('answer', '').strip()
