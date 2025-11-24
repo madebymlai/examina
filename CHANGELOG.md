@@ -5,6 +5,91 @@ All notable changes and completed phases are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2025-11-24
+
+### Added
+- **Phase 6 - Strictly Monolingual Analysis Mode** (`--monolingual` flag)
+  - Automatic primary language detection from first 5 exercises
+  - LLM-based procedure translation to primary language
+  - Prevents cross-language duplicate procedures in bilingual courses
+  - Configurable via `EXAMINA_MONOLINGUAL_ENABLED` environment variable
+  - Backward compatible (default: bilingual mode)
+  - Comprehensive test suite (4/4 tests pass)
+  - Full documentation: `MONOLINGUAL_MODE.md`, `IMPLEMENTATION_SUMMARY.md`
+
+- **Phase 11 - DeepSeek Provider Integration**
+  - Added DeepSeek to all CLI command provider choices
+  - No rate limits (unlimited RPM/TPM)
+  - 10-20x cheaper than Anthropic ($0.14/M vs $3/M tokens)
+  - Excellent quality (671B MoE model)
+  - Set as default provider for bulk operations
+
+- **Phase 9 - Theory Detection Threshold Tuning**
+  - Lowered detection threshold from 2 keywords → 1 keyword
+  - Added explicit prompt notes in `core/analyzer.py` (lines 328, 348)
+  - Expected to improve detection accuracy from 55% to 70%+
+  - Validated with re-analysis of B006802 course
+
+### Changed
+- **Database Cleanup for B006802 (Computer Architecture)**
+  - Language detection: 52 core loops (26 EN, 26 IT), 21 topics
+  - Cross-language deduplication: merged 4 topic pairs + 8 core loop pairs
+  - Topic splitting: "CPU Performance Analysis" (10 loops) → 4 focused subtopics:
+    - Execution Time Analysis (2 loops)
+    - Performance Speedup Analysis (3 loops)
+    - Performance Metrics Calculation (3 loops)
+    - Comparative Performance Analysis (2 loops)
+  - Result: Better topic organization, Amdahl's Law now in focused subtopic
+
+- **DeepSeek Rate Limits Configuration**
+  - Changed from 60 RPM → None (unlimited)
+  - Changed from 1M TPM → None (unlimited)
+  - Validated with successful deduplication and re-analysis runs
+
+- **Default LLM Provider**
+  - Changed from Groq → DeepSeek in `.env`
+  - Reason: No rate limits, 10-20x cheaper, excellent quality
+
+### Fixed
+- **Provider Routing Consistency**
+  - All CLI commands now accept `deepseek` as provider option
+  - Fail-fast design: only fallback on missing API key (not runtime failures)
+  - Cost control preserved (no silent expensive fallbacks)
+
+### Performance
+- **Re-analysis Benchmark** (B006802 course)
+  - Processed 27 exercises in 60 seconds (0.5 ex/s, 2.2s per exercise)
+  - Used DeepSeek with parallel batch processing (batch size: 10)
+  - No rate limit delays (vs Groq would take 3-5 minutes)
+  - Theory detection: 8/27 (29%) - correctly identified procedural-heavy course
+  - Cache system: Second run instant (0% cache misses)
+
+### Documentation
+- **New Files Created**
+  - `MONOLINGUAL_MODE.md` - Feature documentation and usage guide
+  - `IMPLEMENTATION_SUMMARY.md` - Implementation details for monolingual mode
+  - `test_monolingual.py` - Comprehensive test suite (4 tests)
+
+- **TODO Updates**
+  - Marked Phase 6 monolingual mode as complete
+  - Marked Phase 9 theory threshold tuning as complete
+  - Added new TODO: Analysis Performance Optimization (0.5 → 2-3 ex/s target)
+
+### Commits (Session Summary)
+1. **bb54c3c** - Update documentation for Phase 8: Automatic Topic Splitting
+2. **71effc4** - Add automatic topic splitting feature (Phase 6)
+3. **7e5d9d3** - Fix generic topic names - enforce specific topic clustering
+4. **dc98edd** - Tune theory detection threshold: 1 keyword now sufficient (was 2)
+5. **0779269** - Mark theory detection threshold tuning as complete in TODO.md
+6. **7ebc69e** - Add DeepSeek provider option to all CLI commands
+7. **e368cd4** - Implement strictly monolingual analysis mode (Phase 6 TODO)
+8. **1545214** - Update TODO: mark monolingual mode complete, add performance optimization
+
+### Lines of Code
+- **947 lines added** for monolingual mode (6 files modified)
+- **24.5 KB documentation** created
+- **Total session**: ~1000 lines of production code
+
 ## [0.11.0] - 2025-11-24
 
 ### Added
