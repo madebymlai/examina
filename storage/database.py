@@ -446,7 +446,6 @@ class Database:
                     id TEXT PRIMARY KEY,
                     course_code TEXT NOT NULL,
                     material_type TEXT NOT NULL,
-                    topic_id INTEGER,
                     title TEXT,
                     content TEXT NOT NULL,
                     source_pdf TEXT NOT NULL,
@@ -455,8 +454,7 @@ class Database:
                     image_paths TEXT,
                     latex_content TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (course_code) REFERENCES courses(code),
-                    FOREIGN KEY (topic_id) REFERENCES topics(id)
+                    FOREIGN KEY (course_code) REFERENCES courses(code)
                 )
             """)
             self.conn.execute("""
@@ -464,14 +462,38 @@ class Database:
                 ON learning_materials(course_code)
             """)
             self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_learning_materials_topic
-                ON learning_materials(topic_id)
-            """)
-            self.conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_learning_materials_type
                 ON learning_materials(material_type)
             """)
             print("[INFO] Migration completed: learning_materials table created")
+
+        # Phase: Learning Materials Support - Many-to-many: materials ↔ topics
+        cursor = self.conn.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='material_topics'
+        """)
+        if not cursor.fetchone():
+            print("[INFO] Running migration: Creating material_topics join table")
+            self.conn.execute("""
+                CREATE TABLE material_topics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    material_id TEXT NOT NULL,
+                    topic_id INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (material_id) REFERENCES learning_materials(id),
+                    FOREIGN KEY (topic_id) REFERENCES topics(id),
+                    UNIQUE(material_id, topic_id)
+                )
+            """)
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_material_topics_material
+                ON material_topics(material_id)
+            """)
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_material_topics_topic
+                ON material_topics(topic_id)
+            """)
+            print("[INFO] Migration completed: material_topics join table created")
 
         # Phase: Learning Materials Support - Create links between materials and exercises
         cursor = self.conn.execute("""
@@ -1864,11 +1886,13 @@ class Database:
 
     def store_learning_material(self, material_id: str, course_code: str,
                                 material_type: str, content: str, source_pdf: str,
-                                page_number: int, topic_id: Optional[int] = None,
-                                title: Optional[str] = None, has_images: bool = False,
+                                page_number: int, title: Optional[str] = None,
+                                has_images: bool = False,
                                 image_paths: Optional[List[str]] = None,
                                 latex_content: Optional[str] = None):
         """Store a learning material (theory, worked example, reference).
+
+        Note: Use link_material_to_topic() to associate with topics (many-to-many).
 
         Args:
             material_id: Unique ID for the material
@@ -1877,7 +1901,6 @@ class Database:
             content: Material content
             source_pdf: Source PDF filename
             page_number: Page number
-            topic_id: Optional topic ID to link to
             title: Optional title
             has_images: Whether material has images
             image_paths: List of image paths
@@ -1887,11 +1910,24 @@ class Database:
 
         self.conn.execute("""
             INSERT OR REPLACE INTO learning_materials
-            (id, course_code, material_type, topic_id, title, content,
+            (id, course_code, material_type, title, content,
              source_pdf, page_number, has_images, image_paths, latex_content)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (material_id, course_code, material_type, topic_id, title, content,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (material_id, course_code, material_type, title, content,
               source_pdf, page_number, has_images, image_paths_json, latex_content))
+
+    def link_material_to_topic(self, material_id: str, topic_id: int):
+        """Link a learning material to a topic (many-to-many).
+
+        Args:
+            material_id: Learning material ID
+            topic_id: Topic ID
+        """
+        self.conn.execute("""
+            INSERT OR IGNORE INTO material_topics
+            (material_id, topic_id)
+            VALUES (?, ?)
+        """, (material_id, topic_id))
 
     def get_learning_materials_by_course(self, course_code: str,
                                         material_type: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -1927,7 +1963,7 @@ class Database:
 
     def get_learning_materials_by_topic(self, topic_id: int,
                                        material_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get learning materials linked to a topic.
+        """Get learning materials linked to a topic (via many-to-many join).
 
         Args:
             topic_id: Topic ID
@@ -1938,15 +1974,19 @@ class Database:
         """
         if material_type:
             cursor = self.conn.execute("""
-                SELECT * FROM learning_materials
-                WHERE topic_id = ? AND material_type = ?
-                ORDER BY created_at DESC
+                SELECT lm.*
+                FROM learning_materials lm
+                JOIN material_topics mt ON lm.id = mt.material_id
+                WHERE mt.topic_id = ? AND lm.material_type = ?
+                ORDER BY lm.created_at DESC
             """, (topic_id, material_type))
         else:
             cursor = self.conn.execute("""
-                SELECT * FROM learning_materials
-                WHERE topic_id = ?
-                ORDER BY created_at DESC
+                SELECT lm.*
+                FROM learning_materials lm
+                JOIN material_topics mt ON lm.id = mt.material_id
+                WHERE mt.topic_id = ?
+                ORDER BY lm.created_at DESC
             """, (topic_id,))
 
         results = []
@@ -1956,6 +1996,25 @@ class Database:
                 result['image_paths'] = json.loads(result['image_paths'])
             results.append(result)
         return results
+
+    def get_topics_for_material(self, material_id: str) -> List[Dict[str, Any]]:
+        """Get all topics linked to a learning material.
+
+        Args:
+            material_id: Learning material ID
+
+        Returns:
+            List of topic dictionaries
+        """
+        cursor = self.conn.execute("""
+            SELECT t.*
+            FROM topics t
+            JOIN material_topics mt ON t.id = mt.topic_id
+            WHERE mt.material_id = ?
+            ORDER BY t.name
+        """, (material_id,))
+
+        return [dict(row) for row in cursor.fetchall()]
 
     def link_material_to_exercise(self, material_id: str, exercise_id: str,
                                   link_type: str):
