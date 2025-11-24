@@ -20,13 +20,15 @@ class Config:
 
     # LLM Settings
     LLM_PROVIDER = os.getenv("EXAMINA_LLM_PROVIDER", "anthropic")
+
+    # Ollama Settings (only used if provider=ollama)
     LLM_PRIMARY_MODEL = os.getenv("EXAMINA_PRIMARY_MODEL", "qwen2.5:14b")
     LLM_FAST_MODEL = os.getenv("EXAMINA_FAST_MODEL", "llama3.1:8b")
     LLM_EMBED_MODEL = os.getenv("EXAMINA_EMBED_MODEL", "nomic-embed-text")
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-    # API Keys (optional fallback)
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "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")
+    # API Keys
+    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
