@@ -21,14 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Async execution: 1.27s
   - **Speedup: 5x faster**
 
-- **Real-world benchmark** (27 exercises, B006802 course, DeepSeek):
+- **Real-world benchmark - DeepSeek** (27 exercises, no rate limit):
   - Sync mode: 68.8s (34 API calls)
   - Async mode: 61.4s (29 API calls)
   - **Speedup: 1.12x (12% faster)**
 
+- **Real-world benchmark - Groq** (27 exercises, 30 req/min rate limit):
+  - Sync mode: 90.9s (2 API calls)
+  - Async mode: 34.3s (0 API calls - fully cached)
+  - **Speedup: 2.65x (165% faster)**
+
 - **Speedup factors**:
   - Best-case: 5x (many concurrent requests, high-latency provider)
-  - Typical: 1.1-1.5x (single batch, fast provider like DeepSeek)
+  - Rate-limited (Groq): 2.65x (rate limit forces sequential delays in sync mode)
+  - Fast provider (DeepSeek): 1.12x (low latency = less I/O overlap benefit)
   - Scales with: batch count, provider latency, rate limits
 
 - **Architecture improvement**:

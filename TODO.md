@@ -43,13 +43,14 @@
     - Converted analyzer to use asyncio.gather() for true concurrent I/O
     - CLI flag: `--async-mode` (opt-in, backward compatible)
     - Micro-benchmark: 5 parallel requests = 5x speedup
-    - Real-world: 27 exercises = 1.12x speedup (68.8s→61.4s with DeepSeek)
-    - Speedup varies: best with multiple batches, high-latency providers, rate limits
+    - Real-world (DeepSeek, no rate limit): 1.12x speedup (68.8s→61.4s)
+    - Real-world (Groq, 30 req/min): 2.65x speedup (90.9s→34.3s)
+    - **Validated**: Async benefits scale significantly with rate limits
   - **Remaining options for further improvement**:
     - **Option 3**: Procedure pattern caching - High effort, very high gain
     - **Option 4**: Stream processing pipeline - High effort, architectural change
-  - **Current performance**: 0.39-0.44 ex/s (27 exercises in 61-69s)
-  - **Analysis**: Modest real-world gain; consider Option 3 for larger improvement
+  - **Current performance**: 0.39-0.79 ex/s (27 exercises in 34-69s depending on provider/mode)
+  - **Recommendation**: Use `--async-mode` with rate-limited providers (Groq) for best results
 
 ### Phase 6 - Multi-Core-Loop Support
 - [x] **Clean up orphaned core loops** - ✅ Added `--clean-orphans` flag to deduplicate command
