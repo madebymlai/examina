@@ -16,10 +16,11 @@
 - [x] Batch processing optimization - 7-8x speedup with parallel processing
 - [x] Caching LLM responses - File-based cache with TTL, 100% hit rate on re-runs
 - [x] Deduplicate command - Merge existing duplicates with `examina deduplicate`
-- [ ] Language-aware deduplication - Match "Finite State Machines" with "Macchine a Stati Finiti"
-- [ ] Translation dictionary for English/Italian topic matching
-- [ ] Semantic similarity instead of string similarity (use embeddings)
+- [x] Language-aware deduplication - Match "Finite State Machines" with "Macchine a Stati Finiti"
+- [x] Translation dictionary for English/Italian topic matching
+- [x] Semantic similarity instead of string similarity (use embeddings)
 - [ ] Provider-agnostic rate limiting tracker
+- [ ] **Handle exam files with solutions** - Parse exam PDFs that include both questions AND solutions in the same document (currently assumes questions-only format)
 
 ## Phase 4 - Tutor Features ✅ COMPLETED
 
@@ -173,6 +174,7 @@
 - [ ] Language detection for procedures - Automatically detect and merge equivalent procedures in different languages
 - [ ] Strictly monolingual analysis mode - Option to ensure analysis extracts procedures in only one language
 - [ ] Cross-language procedure similarity - Use embeddings to match semantically equivalent procedures across Italian/English
+- [ ] **Clean up orphaned core loops** - Remove core loops not linked to any exercises (ADE: 20 orphaned, AL: 36 orphaned, PC: 10 orphaned) - Add `--clean-orphans` flag to deduplicate command
 
 ## Phase 7 - Enhanced Learning System 🚧 IN PROGRESS
 
