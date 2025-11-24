@@ -250,11 +250,14 @@ class SemanticMatcher:
         Detect if two texts are translations of each other.
 
         This checks against known translation pairs for computer science terms.
+        Uses a conservative approach: requires multiple translation pairs AND
+        similar text structure to avoid false positives.
 
         Examples:
         - "Finite State Machines" ↔ "Macchine a Stati Finiti" → True
         - "Moore Machine" ↔ "Macchina di Moore" → True
         - "Mealy Machine" ↔ "Moore Machine" → False
+        - "Implementazione Monitor" ↔ "Progettazione Monitor" → False (different verbs)
 
         Args:
             text1: First text
@@ -271,6 +274,10 @@ class SemanticMatcher:
         if t1_lower == t2_lower:
             return True
 
+        # Count translation pairs found
+        translation_pairs_found = 0
+        total_unique_words = len(set(t1_lower.split()) | set(t2_lower.split()))
+
         # Check if either text contains known translation pairs
         for en_term, it_term in TRANSLATION_PAIRS:
             # Check if both terms appear (one in each text)
@@ -279,8 +286,21 @@ class SemanticMatcher:
             has_en_in_t2 = en_term in t2_lower
             has_it_in_t2 = it_term in t2_lower
 
-            # Translation if one has English term and other has Italian term
+            # Count translation pair if one has English term and other has Italian term
             if (has_en_in_t1 and has_it_in_t2) or (has_it_in_t1 and has_en_in_t2):
+                translation_pairs_found += 1
+
+        # Require at least 2 translation pairs to avoid false positives
+        # (e.g., "Implementazione Monitor" vs "Progettazione Monitor" has only 1 pair: monitor)
+        if translation_pairs_found >= 2:
+            return True
+
+        # Single translation pair is OK only if the texts are very short (2-4 words)
+        # and the word counts are similar
+        if translation_pairs_found == 1:
+            t1_words = len(t1_lower.split())
+            t2_words = len(t2_lower.split())
+            if 2 <= t1_words <= 4 and 2 <= t2_words <= 4 and abs(t1_words - t2_words) <= 1:
                 return True
 
         return False

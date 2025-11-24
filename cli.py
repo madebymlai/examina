@@ -1988,9 +1988,11 @@ def gaps(course, loop, lang):
 @click.option('--course', '-c', required=True, help='Course code')
 @click.option('--dry-run', is_flag=True, help='Show what would be merged without making changes')
 @click.option('--threshold', type=float, default=None, help='Similarity threshold (0.0-1.0, default: 0.85 for semantic, 0.85 for string)')
-def deduplicate(course, dry_run, threshold):
-    """Merge duplicate topics and core loops using semantic similarity."""
+@click.option('--bilingual', is_flag=True, help='Enable bilingual translation matching (English/Italian)')
+def deduplicate(course, dry_run, threshold, bilingual):
+    """Merge duplicate exercises, topics, and core loops using semantic similarity."""
     from difflib import SequenceMatcher
+    import hashlib
 
     # Try to import semantic matcher
     try:
@@ -2019,8 +2021,32 @@ def deduplicate(course, dry_run, threshold):
     # Use provided threshold or default
     threshold = threshold if threshold is not None else default_threshold
 
+    # Bilingual translation dictionary (English ↔ Italian)
+    bilingual_translations = {
+        'finite state machine': 'macchina a stati finiti',
+        'finite state automata': 'automi a stati finiti',
+        'boolean algebra': 'algebra booleana',
+        'sequential circuit': 'circuito sequenziale',
+        'floating point': 'virgola mobile',
+        'number system': 'sistema di numerazione',
+        'base conversion': 'conversione di base',
+        'mealy machine': 'macchina di mealy',
+        'moore machine': 'macchina di moore',
+        'state minimization': 'minimizzazione degli stati',
+        'linear independence': 'indipendenza lineare',
+        'vector space': 'spazio vettoriale',
+        'eigenvalue': 'autovalore',
+        'eigenvector': 'autovettore',
+        'mutual exclusion': 'mutua esclusione',
+        'deadlock': 'stallo',
+        'producer consumer': 'produttore consumatore',
+    }
+
     console.print(f"\n[bold cyan]Deduplicating {course}...[/bold cyan]")
-    console.print(f"[info]Threshold: {threshold:.2f}[/info]\n")
+    console.print(f"[info]Threshold: {threshold:.2f}[/info]")
+    if bilingual:
+        console.print(f"[info]Bilingual mode: ENABLED (English/Italian)[/info]")
+    console.print()
 
     if dry_run:
         console.print("[yellow]DRY RUN MODE - No changes will be made[/yellow]\n")
@@ -2041,14 +2067,78 @@ def deduplicate(course, dry_run, threshold):
 
             course_code = found_course['code']
 
+            # NEW: Deduplicate exercises (by text hash)
+            console.print("[bold]Deduplicating Exercises...[/bold]")
+            cursor = db.conn.execute("""
+                SELECT id, text, exercise_type, course_code
+                FROM exercises
+                WHERE course_code = ? AND analyzed = 1
+                ORDER BY id
+            """, (course_code,))
+
+            exercises = cursor.fetchall()
+            exercise_hashes = {}
+            exercise_duplicates = []
+
+            for ex_id, text, ex_type, _ in exercises:
+                # Create hash of normalized text (remove whitespace variations)
+                normalized = ' '.join(text.split())
+                text_hash = hashlib.md5(normalized.encode()).hexdigest()
+
+                if text_hash in exercise_hashes:
+                    # Found duplicate
+                    original_id = exercise_hashes[text_hash]
+                    exercise_duplicates.append((original_id, ex_id, ex_type))
+                else:
+                    exercise_hashes[text_hash] = ex_id
+
+            if exercise_duplicates:
+                console.print(f"Found {len(exercise_duplicates)} duplicate exercise(s):\n")
+                for orig_id, dup_id, ex_type in exercise_duplicates:
+                    ex_type_display = ex_type or 'procedural'
+                    console.print(f"  • {orig_id[:30]}... ← {dup_id[:30]}... ({ex_type_display})")
+
+                if not dry_run:
+                    for orig_id, dup_id, ex_type in exercise_duplicates:
+                        # Delete duplicate exercise (foreign keys will handle cleanup)
+                        db.conn.execute("DELETE FROM exercises WHERE id = ?", (dup_id,))
+
+                    db.conn.commit()
+                    console.print(f"\n[green]✓ Removed {len(exercise_duplicates)} duplicate exercises[/green]\n")
+            else:
+                console.print("  No duplicate exercises found\n")
+
             # Deduplicate topics
             console.print("[bold]Deduplicating Topics...[/bold]")
             topics = db.get_topics_by_course(course_code)
             topic_merges = []
             topic_skips = []
 
+            def is_bilingual_match(name1, name2):
+                """Check if two topic names are bilingual translations."""
+                if not bilingual:
+                    return False, None
+
+                name1_lower = name1.lower()
+                name2_lower = name2.lower()
+
+                # Check both directions
+                for en, it in bilingual_translations.items():
+                    # Check if one contains English and other contains Italian
+                    if (en in name1_lower and it in name2_lower) or (it in name1_lower and en in name2_lower):
+                        return True, f"bilingual_match({en}↔{it})"
+
+                return False, None
+
             for i, topic1 in enumerate(topics):
                 for topic2 in topics[i+1:]:
+                    # First check bilingual translations
+                    is_bilingual, bilingual_reason = is_bilingual_match(topic1['name'], topic2['name'])
+                    if is_bilingual:
+                        topic_merges.append((topic1, topic2, 1.0, bilingual_reason))
+                        continue
+
+                    # Then check semantic/string similarity
                     if use_semantic and semantic_matcher:
                         result = semantic_matcher.should_merge(
                             topic1['name'], topic2['name'], threshold
@@ -2104,6 +2194,13 @@ def deduplicate(course, dry_run, threshold):
 
             for i, loop1 in enumerate(core_loops):
                 for loop2 in core_loops[i+1:]:
+                    # First check bilingual translations
+                    is_bilingual, bilingual_reason = is_bilingual_match(loop1['name'], loop2['name'])
+                    if is_bilingual:
+                        loop_merges.append((loop1, loop2, 1.0, bilingual_reason))
+                        continue
+
+                    # Then check semantic/string similarity
                     if use_semantic and semantic_matcher:
                         result = semantic_matcher.should_merge(
                             loop1['name'], loop2['name'], threshold
