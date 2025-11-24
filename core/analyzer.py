@@ -1131,6 +1131,384 @@ Respond ONLY with valid JSON, no other text.
         return deduplicated_loops
 
     # ========================================================================
+    # Learning Material Analysis Methods (Phase 10)
+    # ========================================================================
+
+    def analyze_learning_material(self, material_text: str, course_name: str) -> AnalysisResult:
+        """Analyze a learning material to detect topics.
+
+        Similar to analyze_exercise() but for theory/worked examples.
+        Returns topic names that this material relates to.
+
+        Args:
+            material_text: Material content (theory or worked example)
+            course_name: Course name for context
+
+        Returns:
+            AnalysisResult with topic and metadata
+        """
+        # Build prompt for material analysis
+        prompt = self._build_material_analysis_prompt(material_text, course_name)
+
+        # Call LLM
+        response = self.llm.generate(
+            prompt=prompt,
+            model=self.llm.primary_model,
+            temperature=0.3,
+            json_mode=True
+        )
+
+        if not response.success:
+            print(f"[ERROR] LLM failed for material: {response.error}")
+            print(f"  Text preview: {material_text[:100]}...")
+            return self._default_analysis_result()
+
+        # Parse JSON response
+        data = self.llm.parse_json_response(response)
+        if not data:
+            return self._default_analysis_result()
+
+        # Extract topics (material may relate to multiple topics)
+        topics = data.get("topics", [])
+        primary_topic = topics[0] if topics else None
+
+        # Extract procedures if any (for worked examples)
+        procedures = []
+        if "procedures" in data and data["procedures"]:
+            for proc_data in data["procedures"]:
+                procedures.append(ProcedureInfo(
+                    name=proc_data.get("name", "Unknown Procedure"),
+                    type=proc_data.get("type", "other"),
+                    steps=proc_data.get("steps", []),
+                    point_number=proc_data.get("point_number"),
+                    transformation=proc_data.get("transformation")
+                ))
+
+        # Return analysis result
+        return AnalysisResult(
+            is_valid_exercise=True,  # Materials are always valid
+            is_fragment=False,
+            should_merge_with_previous=False,
+            topic=primary_topic,
+            difficulty=data.get("difficulty"),
+            variations=topics[1:] if len(topics) > 1 else [],  # Additional topics
+            confidence=data.get("confidence", 0.5),
+            procedures=procedures,
+            exercise_type=data.get("material_type", "theory"),
+            type_confidence=data.get("type_confidence", 0.8)
+        )
+
+    def _build_material_analysis_prompt(self, material_text: str, course_name: str) -> str:
+        """Build prompt for learning material analysis.
+
+        Args:
+            material_text: Material content
+            course_name: Course name
+
+        Returns:
+            Prompt string
+        """
+        # Language instruction
+        language_instruction = {
+            "it": "IMPORTANTE: Rispondi in ITALIANO. Tutti i nomi di topic devono essere in italiano.",
+            "en": "IMPORTANT: Respond in ENGLISH. All topic names must be in English."
+        }
+
+        prompt = f"""You are analyzing learning materials (theory or worked examples) for the course: {course_name}.
+
+Your task is to analyze this material and determine:
+1. What topic(s) does it cover?
+2. What concepts or procedures does it explain?
+3. Is it theory (definitions, explanations) or a worked example (step-by-step solution)?
+
+MATERIAL TEXT:
+```
+{material_text[:3000]}
+```
+
+{language_instruction.get(self.language, language_instruction["en"])}
+
+Respond in JSON format with:
+{{
+  "topics": ["primary topic", "secondary topic", ...],  // 1-3 specific topics this material covers
+  "material_type": "theory|worked_example|reference",  // Type of material
+  "difficulty": "easy|medium|hard",  // Complexity level
+  "confidence": 0.0-1.0,  // Your confidence in this analysis
+  "procedures": [  // ONLY for worked examples: procedures demonstrated
+    {{
+      "name": "procedure name",
+      "type": "design|transformation|verification|minimization|analysis|other",
+      "steps": ["step 1", "step 2", ...],
+      "point_number": null,
+      "transformation": null
+    }}
+  ],
+  "key_concepts": ["concept1", "concept2", ...],  // Main concepts covered
+  "type_confidence": 0.0-1.0  // Confidence in material type
+}}
+
+TOPIC NAMING RULES (CRITICAL):
+- NEVER use the course name "{course_name}" as the topic - it's too generic!
+- Topics MUST be SPECIFIC subtopics within the course
+- Be as specific as possible - narrow topics are better than broad ones
+- For worked examples, identify the procedure/algorithm being demonstrated
+- Materials may relate to multiple topics - list the most relevant ones (1-3)
+
+MATERIAL TYPE CLASSIFICATION:
+- **theory**: Definitions, theorems, explanations, conceptual content
+  * Examples: "Definition of eigenvalues", "Properties of vector spaces"
+  * No step-by-step computations
+
+- **worked_example**: Step-by-step solution showing how to solve a problem
+  * Examples: "Computing eigenvalues of a matrix", "Designing a Mealy machine"
+  * Shows the execution of a procedure/algorithm
+  * Should identify the procedure and extract steps
+
+- **reference**: Tables, formulas, reference material without explanations
+  * Examples: "Table of Fourier transforms", "Formula sheet"
+
+Respond ONLY with valid JSON, no other text.
+"""
+        return prompt
+
+    def link_materials_to_topics(self, course_code: str):
+        """Analyze learning materials and link them to topics.
+
+        For each unlinked learning material:
+        1. Analyze content to detect topics
+        2. Match detected topics to existing course topics (by name/semantic similarity)
+        3. Create links via db.link_material_to_topic()
+
+        Args:
+            course_code: Course code
+        """
+        with Database() as db:
+            # Get all materials for this course
+            materials = db.get_learning_materials_by_course(course_code)
+
+            if not materials:
+                print(f"[INFO] No learning materials found for course {course_code}")
+                return
+
+            # Get existing topics for this course
+            course_topics = db.get_topics_by_course(course_code)
+            topic_map = {t['name']: t for t in course_topics}
+
+            if not course_topics:
+                print(f"[WARNING] No topics found for course {course_code}. Run 'analyze' first.")
+                return
+
+            # Get course name for context
+            course = db.get_course(course_code)
+            course_name = course['name'] if course else course_code
+
+            print(f"[INFO] Linking {len(materials)} materials to {len(course_topics)} topics...")
+
+            linked_count = 0
+            skipped_count = 0
+
+            for material in materials:
+                # Check if already linked
+                existing_topics = db.get_topics_for_material(material['id'])
+                if existing_topics:
+                    print(f"[DEBUG] Material {material['id'][:40]} already linked to {len(existing_topics)} topic(s), skipping")
+                    skipped_count += 1
+                    continue
+
+                # Analyze material to detect topics
+                print(f"[DEBUG] Analyzing material: {material['id'][:40]}... (type: {material['material_type']})")
+                analysis = self.analyze_learning_material(
+                    material['content'],
+                    course_name
+                )
+
+                if analysis.confidence < Config.MIN_ANALYSIS_CONFIDENCE:
+                    print(f"[WARNING] Low confidence analysis ({analysis.confidence:.2f}), skipping material")
+                    continue
+
+                # Collect all detected topics (primary + variations)
+                detected_topics = []
+                if analysis.topic:
+                    detected_topics.append(analysis.topic)
+                if analysis.variations:
+                    detected_topics.extend(analysis.variations)
+
+                if not detected_topics:
+                    print(f"[WARNING] No topics detected for material {material['id'][:40]}")
+                    continue
+
+                # Match each detected topic to existing course topics
+                for detected_topic in detected_topics:
+                    matched_topic_id = self._match_topic_to_existing(
+                        detected_topic,
+                        course_topics,
+                        db
+                    )
+
+                    if matched_topic_id:
+                        db.link_material_to_topic(material['id'], matched_topic_id)
+                        matched_topic = next(t for t in course_topics if t['id'] == matched_topic_id)
+                        print(f"[INFO] Linked material to topic: '{matched_topic['name']}'")
+                        linked_count += 1
+                    else:
+                        print(f"[WARNING] Could not match detected topic '{detected_topic}' to existing topics")
+
+            print(f"\n[SUMMARY] Material linking complete:")
+            print(f"  Linked: {linked_count} material-topic links created")
+            print(f"  Skipped (already linked): {skipped_count} materials")
+
+    def _match_topic_to_existing(self, detected_topic: str, course_topics: List[Dict[str, Any]],
+                                  db) -> Optional[int]:
+        """Match a detected topic name to an existing course topic.
+
+        Uses semantic similarity to find the best match.
+
+        Args:
+            detected_topic: Topic name detected from material
+            course_topics: List of existing course topics
+            db: Database instance
+
+        Returns:
+            Topic ID if match found, None otherwise
+        """
+        threshold = Config.SEMANTIC_SIMILARITY_THRESHOLD if self.use_semantic else Config.CORE_LOOP_SIMILARITY_THRESHOLD
+
+        best_match_id = None
+        best_similarity = 0.0
+        best_reason = ""
+
+        for topic in course_topics:
+            # Try semantic matching if available
+            if self.use_semantic and self.semantic_matcher:
+                result = self.semantic_matcher.should_merge(
+                    detected_topic, topic['name'], threshold
+                )
+                if result.should_merge and result.similarity_score > best_similarity:
+                    best_similarity = result.similarity_score
+                    best_match_id = topic['id']
+                    best_reason = result.reason
+            else:
+                # Fallback to string similarity
+                similarity, reason = self._similarity(detected_topic, topic['name'])
+                if similarity >= threshold and similarity > best_similarity:
+                    best_similarity = similarity
+                    best_match_id = topic['id']
+                    best_reason = reason
+
+        if best_match_id:
+            matched_topic = next(t for t in course_topics if t['id'] == best_match_id)
+            print(f"[MATCH] '{detected_topic}' → '{matched_topic['name']}' (similarity: {best_similarity:.2f}, reason: {best_reason})")
+
+        return best_match_id
+
+    def link_worked_examples_to_exercises(self, course_code: str, max_links_per_example: int = 5):
+        """Link worked examples to similar practice exercises.
+
+        For each worked_example material:
+        1. Get its topics
+        2. Find exercises with same topics
+        3. Use semantic similarity to find most related exercises
+        4. Create links via db.link_material_to_exercise(type='worked_example')
+
+        Args:
+            course_code: Course code
+            max_links_per_example: Maximum number of exercises to link per example
+        """
+        with Database() as db:
+            # Get all worked example materials
+            worked_examples = db.get_learning_materials_by_course(
+                course_code,
+                material_type='worked_example'
+            )
+
+            if not worked_examples:
+                print(f"[INFO] No worked examples found for course {course_code}")
+                return
+
+            print(f"[INFO] Linking {len(worked_examples)} worked examples to exercises...")
+
+            total_links = 0
+
+            for example in worked_examples:
+                # Get topics for this worked example
+                example_topics = db.get_topics_for_material(example['id'])
+
+                if not example_topics:
+                    print(f"[WARNING] Worked example {example['id'][:40]} has no topics, skipping")
+                    continue
+
+                print(f"[DEBUG] Processing example {example['id'][:40]} with {len(example_topics)} topic(s)")
+
+                # Find exercises with same topics
+                candidate_exercises = []
+                for topic in example_topics:
+                    # Get core loops for this topic
+                    core_loops = db.get_core_loops_by_topic(topic['id'])
+
+                    # Get exercises for each core loop
+                    for core_loop in core_loops:
+                        exercises = db.get_exercises_by_core_loop(core_loop['id'])
+                        candidate_exercises.extend(exercises)
+
+                # Remove duplicates
+                candidate_exercises = {ex['id']: ex for ex in candidate_exercises}.values()
+                candidate_exercises = list(candidate_exercises)
+
+                if not candidate_exercises:
+                    print(f"[WARNING] No candidate exercises found for topics: {[t['name'] for t in example_topics]}")
+                    continue
+
+                print(f"[DEBUG] Found {len(candidate_exercises)} candidate exercises")
+
+                # Rank exercises by similarity to worked example
+                similarities = []
+                for exercise in candidate_exercises:
+                    similarity = self._calculate_text_similarity(
+                        example['content'],
+                        exercise['text']
+                    )
+                    similarities.append((exercise['id'], similarity))
+
+                # Sort by similarity (highest first) and take top N
+                similarities.sort(key=lambda x: x[1], reverse=True)
+                top_matches = similarities[:max_links_per_example]
+
+                # Create links for top matches
+                for exercise_id, similarity in top_matches:
+                    if similarity >= Config.WORKED_EXAMPLE_EXERCISE_SIMILARITY_THRESHOLD:
+                        db.link_material_to_exercise(
+                            example['id'],
+                            exercise_id,
+                            link_type='worked_example'
+                        )
+                        total_links += 1
+                        print(f"[LINK] Example → Exercise {exercise_id[:40]} (similarity: {similarity:.2f})")
+
+            print(f"\n[SUMMARY] Worked example linking complete:")
+            print(f"  Created {total_links} worked_example links")
+
+    def _calculate_text_similarity(self, text1: str, text2: str) -> float:
+        """Calculate similarity between two text strings.
+
+        Uses semantic embeddings if available, otherwise falls back to string matching.
+
+        Args:
+            text1: First text
+            text2: Second text
+
+        Returns:
+            Similarity score (0.0 to 1.0)
+        """
+        if self.use_semantic and self.semantic_matcher:
+            # Use semantic matcher's embedding-based similarity
+            result = self.semantic_matcher.should_merge(text1, text2, threshold=0.0)
+            return result.similarity_score
+        else:
+            # Fallback to string similarity
+            similarity, _ = self._similarity(text1, text2)
+            return similarity
+
+    # ========================================================================
     # Topic Splitting Methods (Phase 6)
     # ========================================================================
 

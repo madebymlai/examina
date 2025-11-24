@@ -1962,32 +1962,40 @@ class Database:
         return results
 
     def get_learning_materials_by_topic(self, topic_id: int,
-                                       material_type: Optional[str] = None) -> List[Dict[str, Any]]:
+                                       material_type: Optional[str] = None,
+                                       limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Get learning materials linked to a topic (via many-to-many join).
 
         Args:
             topic_id: Topic ID
             material_type: Optional filter by material type
+            limit: Optional limit on number of results
 
         Returns:
             List of learning material dictionaries
         """
         if material_type:
-            cursor = self.conn.execute("""
+            query = """
                 SELECT lm.*
                 FROM learning_materials lm
                 JOIN material_topics mt ON lm.id = mt.material_id
                 WHERE mt.topic_id = ? AND lm.material_type = ?
                 ORDER BY lm.created_at DESC
-            """, (topic_id, material_type))
+            """
+            if limit:
+                query += f" LIMIT {limit}"
+            cursor = self.conn.execute(query, (topic_id, material_type))
         else:
-            cursor = self.conn.execute("""
+            query = """
                 SELECT lm.*
                 FROM learning_materials lm
                 JOIN material_topics mt ON lm.id = mt.material_id
                 WHERE mt.topic_id = ?
                 ORDER BY lm.created_at DESC
-            """, (topic_id,))
+            """
+            if limit:
+                query += f" LIMIT {limit}"
+            cursor = self.conn.execute(query, (topic_id,))
 
         results = []
         for row in cursor.fetchall():

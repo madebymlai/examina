@@ -48,8 +48,12 @@ class Tutor:
               adaptive: bool = True,
               include_study_strategy: bool = False,
               show_solutions: bool = True,
-              include_metacognitive: bool = True) -> TutorResponse:
-        """Explain a core loop with theory and procedure.
+              include_metacognitive: bool = True,
+              show_theory: Optional[bool] = None,
+              show_worked_examples: Optional[bool] = None,
+              max_theory_sections: Optional[int] = None,
+              max_worked_examples: Optional[int] = None) -> TutorResponse:
+        """Explain a core loop with theory → worked examples → practice flow.
 
         Args:
             course_code: Course code
@@ -60,6 +64,10 @@ class Tutor:
             include_study_strategy: Whether to include metacognitive study strategy (default: False)
             show_solutions: Whether to show official solutions for exercises (default: True)
             include_metacognitive: Whether to include metacognitive study tips (default: True)
+            show_theory: Whether to show theory materials (default: from Config.SHOW_THEORY_BY_DEFAULT)
+            show_worked_examples: Whether to show worked examples (default: from Config.SHOW_WORKED_EXAMPLES_BY_DEFAULT)
+            max_theory_sections: Max theory sections to show (default: from Config.MAX_THEORY_SECTIONS_IN_LEARN)
+            max_worked_examples: Max worked examples to show (default: from Config.MAX_WORKED_EXAMPLES_IN_LEARN)
 
         Returns:
             TutorResponse with explanation
@@ -67,7 +75,7 @@ class Tutor:
         with Database() as db:
             # Get core loop details
             core_loop = db.conn.execute("""
-                SELECT cl.*, t.name as topic_name
+                SELECT cl.*, t.name as topic_name, t.id as topic_id
                 FROM core_loops cl
                 JOIN topics t ON cl.topic_id = t.id
                 WHERE cl.id = ? AND t.course_code = ?
@@ -77,6 +85,37 @@ class Tutor:
                 return TutorResponse(
                     content="Core loop not found.",
                     success=False
+                )
+
+            topic_id = core_loop['topic_id']
+
+            # Apply Config defaults for Phase 10 parameters if not explicitly set
+            if show_theory is None:
+                show_theory = Config.SHOW_THEORY_BY_DEFAULT
+            if show_worked_examples is None:
+                show_worked_examples = Config.SHOW_WORKED_EXAMPLES_BY_DEFAULT
+            if max_theory_sections is None:
+                max_theory_sections = Config.MAX_THEORY_SECTIONS_IN_LEARN
+            if max_worked_examples is None:
+                max_worked_examples = Config.MAX_WORKED_EXAMPLES_IN_LEARN
+
+            # Get learning materials for this topic (theory and worked examples)
+            # Always fetch materials (default flow), but respect show flags and limits
+            theory_materials = []
+            worked_examples = []
+
+            if show_theory:
+                theory_materials = db.get_learning_materials_by_topic(
+                    topic_id=topic_id,
+                    material_type='theory',
+                    limit=max_theory_sections
+                )
+
+            if show_worked_examples:
+                worked_examples = db.get_learning_materials_by_topic(
+                    topic_id=topic_id,
+                    material_type='worked_example',
+                    limit=max_worked_examples
                 )
 
             # Get example exercises (with solutions if available)
@@ -147,10 +186,22 @@ class Tutor:
         # Combine prerequisite concepts with LLM explanation
         full_content = []
 
+        # 1. Show theory materials first (if any)
+        if theory_materials:
+            full_content.append(self._display_theory_materials(theory_materials, self.language))
+            full_content.append("\n" + "=" * 60 + "\n")
+
+        # 2. Show worked examples (if any)
+        if worked_examples:
+            full_content.append(self._display_worked_examples(worked_examples, self.language))
+            full_content.append("\n" + "=" * 60 + "\n")
+
+        # 3. Show prerequisite concepts
         if prerequisite_text:
             full_content.append(prerequisite_text)
             full_content.append("\n" + "=" * 60 + "\n")
 
+        # 4. Show LLM-generated explanation
         full_content.append(response.text)
 
         # Add study strategy if requested
@@ -191,7 +242,11 @@ class Tutor:
                 "includes_study_strategy": include_study_strategy,
                 "includes_metacognitive": include_metacognitive,
                 "has_solutions": len(exercises_with_solutions) > 0,
-                "solutions_count": len(exercises_with_solutions)
+                "solutions_count": len(exercises_with_solutions),
+                "theory_materials_count": len(theory_materials),
+                "worked_examples_count": len(worked_examples),
+                "has_theory": len(theory_materials) > 0,
+                "has_worked_examples": len(worked_examples) > 0
             }
         )
 
@@ -236,15 +291,30 @@ class Tutor:
 
             # Pick random exercise
             exercise = random.choice(exercises)
+            exercise_id = exercise['id']
+
+            # Check if there are linked worked examples
+            linked_materials = db.get_materials_for_exercise(exercise_id)
+            worked_example_hints = [
+                m for m in linked_materials
+                if m.get('material_type') == 'worked_example'
+            ]
+
+        # Format exercise content with hints
+        content = exercise['text']
+        if worked_example_hints:
+            content += self._format_worked_example_hints(worked_example_hints, self.language)
 
         return TutorResponse(
-            content=exercise['text'],
+            content=content,
             success=True,
             metadata={
                 "exercise_id": exercise['id'],
                 "core_loop_id": exercise.get('core_loop_id'),
                 "difficulty": exercise.get('difficulty'),
-                "topic_id": exercise.get('topic_id')
+                "topic_id": exercise.get('topic_id'),
+                "has_worked_example_hints": len(worked_example_hints) > 0,
+                "worked_example_count": len(worked_example_hints)
             }
         )
 
@@ -552,6 +622,172 @@ Create a NEW exercise that:
 Generate ONLY the exercise text, not the solution.
 """
         return prompt
+
+    def _display_theory_materials(self, theory_materials: List[Dict[str, Any]],
+                                  language: str) -> str:
+        """Display theory materials for a topic.
+
+        Args:
+            theory_materials: List of theory material dictionaries
+            language: Output language ("en" or "it")
+
+        Returns:
+            Formatted string with theory materials
+        """
+        language_headers = {
+            "it": {
+                "title": "MATERIALI TEORICI",
+                "intro": "Prima di iniziare con gli esercizi, esaminiamo la teoria di base:",
+                "source": "Fonte",
+                "page": "pagina"
+            },
+            "en": {
+                "title": "THEORY MATERIALS",
+                "intro": "Before starting with exercises, let's review the foundational theory:",
+                "source": "Source",
+                "page": "page"
+            }
+        }
+
+        headers = language_headers.get(language, language_headers["en"])
+        lines = [f"\n{headers['title']}\n"]
+        lines.append(headers['intro'])
+        lines.append("")
+
+        for i, material in enumerate(theory_materials, 1):
+            title = material.get('title', f"Theory Section {i}")
+            content = material.get('content', '')
+            source_pdf = material.get('source_pdf', '')
+            page_number = material.get('page_number')
+
+            # Add title
+            lines.append(f"## {title}")
+            lines.append("")
+
+            # Add source info
+            source_info = f"[{headers['source']}: {source_pdf}"
+            if page_number:
+                source_info += f", {headers['page']} {page_number}"
+            source_info += "]"
+            lines.append(source_info)
+            lines.append("")
+
+            # Add content
+            lines.append(content)
+            lines.append("")
+
+            # Add separator if not last item
+            if i < len(theory_materials):
+                lines.append("-" * 40)
+                lines.append("")
+
+        return "\n".join(lines)
+
+    def _display_worked_examples(self, worked_examples: List[Dict[str, Any]],
+                                 language: str) -> str:
+        """Display worked examples for a topic.
+
+        Args:
+            worked_examples: List of worked example dictionaries
+            language: Output language ("en" or "it")
+
+        Returns:
+            Formatted string with worked examples
+        """
+        language_headers = {
+            "it": {
+                "title": "ESEMPI RISOLTI",
+                "intro": "Ora vediamo come applicare questa teoria attraverso esempi risolti passo dopo passo:",
+                "example": "Esempio Risolto",
+                "source": "Fonte",
+                "page": "pagina",
+                "note": "Nota: Questo e un esempio completo che mostra come risolvere questo tipo di problema."
+            },
+            "en": {
+                "title": "WORKED EXAMPLES",
+                "intro": "Now let's see how to apply this theory through step-by-step worked examples:",
+                "example": "Worked Example",
+                "source": "Source",
+                "page": "page",
+                "note": "Note: This is a complete example showing how to solve this type of problem."
+            }
+        }
+
+        headers = language_headers.get(language, language_headers["en"])
+        lines = [f"\n{headers['title']}\n"]
+        lines.append(headers['intro'])
+        lines.append("")
+
+        for i, material in enumerate(worked_examples, 1):
+            title = material.get('title', f"{headers['example']} {i}")
+            content = material.get('content', '')
+            source_pdf = material.get('source_pdf', '')
+            page_number = material.get('page_number')
+
+            # Add title
+            lines.append(f"### {title}")
+            lines.append("")
+
+            # Add source info
+            source_info = f"[{headers['source']}: {source_pdf}"
+            if page_number:
+                source_info += f", {headers['page']} {page_number}"
+            source_info += "]"
+            lines.append(source_info)
+            lines.append("")
+
+            # Add content (the worked solution)
+            lines.append(content)
+            lines.append("")
+
+            # Add helpful note
+            lines.append(f"[{headers['note']}]")
+            lines.append("")
+
+            # Add separator if not last item
+            if i < len(worked_examples):
+                lines.append("-" * 40)
+                lines.append("")
+
+        return "\n".join(lines)
+
+    def _format_worked_example_hints(self, worked_examples: List[Dict[str, Any]],
+                                     language: str) -> str:
+        """Format hints about available worked examples for an exercise.
+
+        Args:
+            worked_examples: List of worked example material dictionaries
+            language: Output language ("en" or "it")
+
+        Returns:
+            Formatted string with hints about worked examples
+        """
+        language_headers = {
+            "it": {
+                "hint": "Suggerimento: Per un problema simile, consulta",
+                "these_worked_examples": "questi esempi risolti",
+                "this_worked_example": "questo esempio risolto"
+            },
+            "en": {
+                "hint": "Hint: For a similar problem, see",
+                "these_worked_examples": "these worked examples",
+                "this_worked_example": "this worked example"
+            }
+        }
+
+        headers = language_headers.get(language, language_headers["en"])
+        lines = ["\n\n---"]
+
+        if len(worked_examples) == 1:
+            title = worked_examples[0].get('title', 'Worked Example')
+            lines.append(f"\n{headers['hint']} {headers['this_worked_example']}: \"{title}\"")
+        else:
+            lines.append(f"\n{headers['hint']} {headers['these_worked_examples']}:")
+            for material in worked_examples:
+                title = material.get('title', 'Worked Example')
+                lines.append(f"  - \"{title}\"")
+
+        return "\n".join(lines)
 
     def _format_procedure(self, procedure: Optional[str]) -> str:
         """Format procedure steps for display."""

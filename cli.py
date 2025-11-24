@@ -333,11 +333,13 @@ def search(course, tag, text, multi_only, limit):
 @click.option('--course', '-c', required=True, help='Course code (e.g., B006802 or ADE)')
 @click.option('--zip', '-z', 'zip_file', required=True, type=click.Path(exists=True),
               help='Path to ZIP file containing exam PDFs')
+@click.option('--material-type', type=click.Choice(['exams', 'notes']),
+              default='exams', help='Type of material: exams (problem sets) or notes (lecture slides)')
 @click.option('--smart-split', is_flag=True, default=False,
               help='Use LLM-based splitting for unstructured materials (lecture notes, embedded examples). Costs API tokens.')
 @click.option('--provider', type=click.Choice(['anthropic', 'groq', 'ollama', 'openai']),
               default=Config.LLM_PROVIDER, help='LLM provider for smart splitting')
-def ingest(course, zip_file, smart_split, provider):
+def ingest(course, zip_file, material_type, smart_split, provider):
     """Ingest course materials (exams, homework, problem sets, lecture notes) for a course."""
     from tqdm import tqdm
 
@@ -365,8 +367,24 @@ def ingest(course, zip_file, smart_split, provider):
         file_mgr = FileManager()
         pdf_processor = PDFProcessor()
 
-        # Choose splitter based on --smart-split flag
-        if smart_split:
+        # Choose splitter based on material type
+        use_smart_splitter = False
+        if material_type == 'notes':
+            # Lecture notes always require smart splitting for content detection
+            from core.smart_splitter import SmartExerciseSplitter
+            from models.llm_manager import LLMManager
+
+            console.print(f"[cyan]📚 Processing lecture notes with smart content detection ({provider})[/cyan]")
+            console.print("[dim]   Detecting theory sections, worked examples, and practice exercises[/dim]\n")
+
+            llm = LLMManager(provider=provider)
+            exercise_splitter = SmartExerciseSplitter(
+                llm_manager=llm,
+                enable_smart_detection=True
+            )
+            use_smart_splitter = True
+        elif material_type == 'exams' and smart_split:
+            # Exams with --smart-split flag use hybrid approach
             from core.smart_splitter import SmartExerciseSplitter
             from models.llm_manager import LLMManager
 
@@ -378,7 +396,9 @@ def ingest(course, zip_file, smart_split, provider):
                 llm_manager=llm,
                 enable_smart_detection=True
             )
+            use_smart_splitter = True
         else:
+            # Default: pattern-based splitting for exams (fast, free)
             exercise_splitter = ExerciseSplitter()
 
         # Extract PDFs from ZIP
@@ -396,6 +416,8 @@ def ingest(course, zip_file, smart_split, provider):
 
         # Process each PDF
         total_exercises = 0
+        total_theory_sections = 0
+        total_worked_examples = 0
         processed_pdfs = 0
 
         for pdf_path in pdf_files:
@@ -412,11 +434,13 @@ def ingest(course, zip_file, smart_split, provider):
                 pdf_content = pdf_processor.process_pdf(pdf_path)
                 console.print(f"   ✓ Extracted {pdf_content.total_pages} pages")
 
-                # Split into exercises
-                if smart_split:
+                # Split into exercises and learning materials
+                learning_materials = []
+                if use_smart_splitter:
                     # SmartExerciseSplitter returns SplitResult
                     split_result = exercise_splitter.split_pdf_content(pdf_content, course_code)
                     exercises = split_result.exercises
+                    learning_materials = split_result.learning_materials
 
                     # Show smart splitting stats
                     if split_result.llm_based_count > 0:
@@ -427,13 +451,18 @@ def ingest(course, zip_file, smart_split, provider):
                                     f"(est. cost: ${split_result.total_cost_estimate:.4f})[/dim]")
                     else:
                         console.print(f"   ✓ Found {len(exercises)} exercise(s) (pattern-based)")
+
+                    # Show learning materials stats if any found
+                    if learning_materials:
+                        console.print(f"   ✓ Found {split_result.theory_count} theory section(s), "
+                                    f"{split_result.worked_example_count} worked example(s)")
                 else:
                     # Regular ExerciseSplitter returns List[Exercise]
                     exercises = exercise_splitter.split_pdf_content(pdf_content, course_code)
 
                 # Filter valid exercises
                 valid_exercises = [ex for ex in exercises if exercise_splitter.validate_exercise(ex)]
-                if not smart_split or (smart_split and len(valid_exercises) != len(exercises)):
+                if not use_smart_splitter or (use_smart_splitter and len(valid_exercises) != len(exercises)):
                     console.print(f"   ✓ {len(valid_exercises)} valid exercise(s) after filtering")
 
                 # Store exercises in database
@@ -473,9 +502,37 @@ def ingest(course, zip_file, smart_split, provider):
 
                         db.add_exercise(exercise_data)
 
+                    # Store learning materials if any
+                    for material in learning_materials:
+                        # Store images if present
+                        material_image_paths = []
+                        if material.has_images:
+                            for i, img_data in enumerate(material.image_data):
+                                img_path = file_mgr.store_image(
+                                    img_data, course_code, material.id, i
+                                )
+                                material_image_paths.append(str(img_path))
+
+                        # Store learning material
+                        db.store_learning_material(
+                            material_id=material.id,
+                            course_code=course_code,
+                            material_type=material.material_type,
+                            content=material.content,
+                            title=material.title,
+                            source_pdf=pdf_path.name,
+                            page_number=material.page_number,
+                            has_images=material.has_images,
+                            image_paths=material_image_paths if material_image_paths else None,
+                            latex_content=material.latex_content
+                        )
+
                     db.conn.commit()
 
                 total_exercises += len(valid_exercises)
+                if use_smart_splitter:
+                    total_theory_sections += sum(1 for m in learning_materials if m.material_type == 'theory')
+                    total_worked_examples += sum(1 for m in learning_materials if m.material_type == 'worked_example')
                 processed_pdfs += 1
                 console.print(f"   ✓ Stored in database\n")
 
@@ -486,7 +543,11 @@ def ingest(course, zip_file, smart_split, provider):
         # Summary
         console.print("[bold green]✨ Ingestion complete![/bold green]\n")
         console.print(f"Processed: {processed_pdfs} PDF(s)")
-        console.print(f"Extracted: {total_exercises} exercise(s)")
+        console.print(f"Ingested: {total_exercises} exercise(s)", end='')
+        if total_theory_sections > 0 or total_worked_examples > 0:
+            console.print(f", {total_theory_sections} theory section(s), {total_worked_examples} worked example(s)")
+        else:
+            console.print()
         console.print(f"\nNext steps:")
         console.print(f"  • examina info --course {course} - View course status")
         console.print(f"  • Phase 3: AI analysis to discover topics and core loops\n")
@@ -833,6 +894,123 @@ def analyze(course, limit, provider, lang, force, parallel, batch_size):
         console.print(f"Next steps:")
         console.print(f"  • examina info --course {course} - View updated course info")
         console.print(f"  • examina learn --course {course} - Start learning (Phase 4)\n")
+
+    except Exception as e:
+        console.print(f"\n[bold red]Error:[/bold red] {e}\n")
+        import traceback
+        traceback.print_exc()
+        raise click.Abort()
+
+
+@cli.command(name='link-materials')
+@click.option('--course', '-c', required=True, help='Course code (e.g., B006802 or ADE)')
+@click.option('--provider', '-p', type=click.Choice(['ollama', 'groq', 'anthropic']), default='anthropic',
+              help='LLM provider (default: anthropic)')
+@click.option('--lang', type=click.Choice(['en', 'it']), default='en',
+              help='Output language for analysis (default: en)')
+@click.option('--link-exercises', is_flag=True,
+              help='Also link worked examples to similar exercises')
+def link_materials(course, provider, lang, link_exercises):
+    """Link learning materials to topics and optionally to exercises.
+
+    This command analyzes learning materials (theory, worked examples) and:
+    1. Detects topics from material content
+    2. Links materials to existing course topics
+    3. (Optional) Links worked examples to similar practice exercises
+    """
+    console.print(f"\n[bold cyan]Linking learning materials for {course}...[/bold cyan]\n")
+
+    try:
+        # Find course
+        with Database() as db:
+            all_courses = db.get_all_courses()
+            found_course = None
+            for c in all_courses:
+                if c['code'] == course or c['acronym'] == course:
+                    found_course = c
+                    break
+
+            if not found_course:
+                console.print(f"[red]Course '{course}' not found.[/red]\n")
+                return
+
+            course_code = found_course['code']
+            console.print(f"Course: {found_course['name']} ({found_course['acronym']})\n")
+
+            # Check for materials
+            materials = db.get_learning_materials_by_course(course_code)
+            if not materials:
+                console.print("[yellow]No learning materials found. Run 'examina ingest' first.[/yellow]\n")
+                return
+
+            material_types = {}
+            for mat in materials:
+                mat_type = mat['material_type']
+                material_types[mat_type] = material_types.get(mat_type, 0) + 1
+
+            console.print(f"Found {len(materials)} learning materials:")
+            for mat_type, count in material_types.items():
+                console.print(f"  • {mat_type}: {count}")
+            console.print()
+
+            # Check for topics
+            topics = db.get_topics_by_course(course_code)
+            if not topics:
+                console.print("[yellow]No topics found. Run 'examina analyze' first.[/yellow]\n")
+                return
+
+            console.print(f"Found {len(topics)} topics in course\n")
+
+        # Initialize components
+        console.print(f"🤖 Initializing AI components (provider: {provider}, language: {lang})...")
+        llm = LLMManager(provider=provider)
+        analyzer = ExerciseAnalyzer(llm, language=lang)
+
+        # Check if provider is ready
+        if provider == "ollama":
+            console.print(f"   Checking {llm.primary_model}...")
+            if not llm.check_model_available(llm.primary_model):
+                console.print(f"[red]Model {llm.primary_model} not found![/red]")
+                console.print(f"[yellow]Run: ollama pull {llm.primary_model}[/yellow]\n")
+                return
+            console.print(f"   ✓ {llm.primary_model} ready\n")
+        elif provider == "groq":
+            console.print(f"   Using Groq API with {llm.primary_model}")
+            if not Config.GROQ_API_KEY:
+                console.print(f"[red]GROQ_API_KEY not set![/red]")
+                console.print(f"[yellow]Get your free API key at: https://console.groq.com[/yellow]")
+                console.print(f"[yellow]Then set it: export GROQ_API_KEY=your_key_here[/yellow]\n")
+                return
+            console.print(f"   ✓ API key found\n")
+        elif provider == "anthropic":
+            console.print(f"   Using Anthropic API with {llm.primary_model}")
+            if not Config.ANTHROPIC_API_KEY:
+                console.print(f"[red]ANTHROPIC_API_KEY not set![/red]")
+                console.print(f"[yellow]Get your API key at: https://console.anthropic.com[/yellow]")
+                console.print(f"[yellow]Then set it: export ANTHROPIC_API_KEY=your_key_here[/yellow]\n")
+                return
+            console.print(f"   ✓ API key found\n")
+
+        # Step 1: Link materials to topics
+        console.print("🔗 Linking materials to topics...")
+        console.print("[dim]This may take a while...[/dim]\n")
+
+        analyzer.link_materials_to_topics(course_code)
+
+        # Step 2: Link worked examples to exercises (if requested)
+        if link_exercises:
+            console.print("\n🔗 Linking worked examples to exercises...")
+            console.print("[dim]This may take a while...[/dim]\n")
+
+            analyzer.link_worked_examples_to_exercises(course_code)
+
+        # Summary
+        console.print("\n[bold green]✨ Material linking complete![/bold green]\n")
+        console.print(f"Next steps:")
+        console.print(f"  • examina info --course {course} - View updated course info")
+        if not link_exercises:
+            console.print(f"  • examina link-materials --course {course} --link-exercises - Link worked examples to exercises")
+        console.print()
 
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {e}\n")

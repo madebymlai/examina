@@ -109,6 +109,16 @@ class Config:
     SMART_SPLIT_MAX_PAGES = int(os.getenv("EXAMINA_SMART_SPLIT_MAX_PAGES", "50"))  # Cost control: max pages to process with LLM
     SMART_SPLIT_CACHE_ENABLED = os.getenv("EXAMINA_SMART_SPLIT_CACHE", "true").lower() == "true"  # Cache LLM detection results
 
+    # Phase 10: Learning Materials Settings
+    # Configuration for theory sections, worked examples, and learning flow
+    LEARNING_MATERIALS_ENABLED = os.getenv("EXAMINA_LEARNING_MATERIALS_ENABLED", "true").lower() == "true"  # Enable learning materials feature
+    SHOW_THEORY_BY_DEFAULT = os.getenv("EXAMINA_SHOW_THEORY", "true").lower() == "true"  # Show theory materials in learn command by default
+    SHOW_WORKED_EXAMPLES_BY_DEFAULT = os.getenv("EXAMINA_SHOW_WORKED_EXAMPLES", "true").lower() == "true"  # Show worked examples by default
+    MAX_THEORY_SECTIONS_IN_LEARN = int(os.getenv("EXAMINA_MAX_THEORY_SECTIONS", "3"))  # Max theory sections to show in learn command
+    MAX_WORKED_EXAMPLES_IN_LEARN = int(os.getenv("EXAMINA_MAX_WORKED_EXAMPLES", "2"))  # Max worked examples to show in learn command
+    MATERIAL_TOPIC_SIMILARITY_THRESHOLD = float(os.getenv("EXAMINA_MATERIAL_TOPIC_THRESHOLD", "0.85"))  # Similarity threshold for linking materials to topics
+    WORKED_EXAMPLE_EXERCISE_SIMILARITY_THRESHOLD = float(os.getenv("EXAMINA_WORKED_EXAMPLE_THRESHOLD", "0.70"))  # Similarity threshold for linking worked examples to exercises
+
     # Rate Limiting Settings
     # Provider-agnostic rate limits (configurable per provider)
     # Set to None for unlimited (e.g., local providers like Ollama)
