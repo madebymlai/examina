@@ -234,7 +234,7 @@ Respond in JSON format with:
   "is_valid_exercise": true/false,  // false if it's just exam instructions or headers
   "is_fragment": true/false,  // true if incomplete or part of larger exercise
   "should_merge_with_previous": true/false,  // true if continuation of previous
-  "topic": "topic name",  // e.g., "Sequential Circuits", "Boolean Algebra"
+  "topic": "SPECIFIC topic name",  // MUST be specific, NOT generic course name!
   "difficulty": "easy|medium|hard",
   "variations": ["variation1", ...],  // specific variants used
   "confidence": 0.0-1.0,  // your confidence in this analysis
@@ -256,6 +256,13 @@ IMPORTANT ANALYSIS GUIDELINES:
 - If text contains only exam rules (like "NON si può usare la calcolatrice"), mark as NOT valid exercise
 - If text is clearly a sub-question (starts with "1.", "2.") right after numbered list, it's a fragment
 - Core loop/procedure is the ALGORITHM/PROCEDURE to solve, not just the topic
+
+TOPIC NAMING RULES (CRITICAL):
+- NEVER use the course name "{course_name}" as the topic - it's too generic!
+- Topics MUST be SPECIFIC subtopics within the course (e.g., for Linear Algebra: "Autovalori e Diagonalizzazione", "Sottospazi Vettoriali", "Applicazioni Lineari")
+- Topics should cluster related procedures together (aim for 3-8 core loops per topic)
+- Be as specific as possible - narrow topics are better than broad ones
+- If unsure, prefer more specific over more general
 
 MULTI-PROCEDURE DETECTION:
 - If exercise has numbered points (1., 2., 3.), analyze EACH point separately
