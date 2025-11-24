@@ -2390,6 +2390,20 @@ def quiz(course, questions, topic, loop, difficulty, review_only, adaptive, proc
 
             console.print(f"\n[dim]Score: {question.score:.1%}[/dim]")
 
+            # Show real-time mastery update for this exercise
+            if adaptive:
+                from core.mastery_aggregator import MasteryAggregator
+                with Database() as db:
+                    agg = MasteryAggregator(db)
+                    ex_mastery = agg.get_exercise_mastery(question.exercise_id)
+                    if ex_mastery:
+                        level = ex_mastery['mastery_level']
+                        level_color = {
+                            'new': 'red', 'learning': 'yellow',
+                            'reviewing': 'cyan', 'mastered': 'green'
+                        }.get(level, 'white')
+                        console.print(f"[dim]Mastery: [{level_color}]{level}[/{level_color}] (reps: {ex_mastery['repetition_number']}, next: {ex_mastery['interval_days']}d)[/dim]")
+
             # Show progress
             answered = i
             session.total_correct = sum(1 for q in session.questions[:answered] if q.is_correct)
@@ -2432,6 +2446,26 @@ def quiz(course, questions, topic, loop, difficulty, review_only, adaptive, proc
             mastery_color = "green" if mastery_pct >= 80 else "yellow" if mastery_pct >= 50 else "red"
 
             console.print(f"  • {loop_name}: [{mastery_color}]{mastery_pct:.0f}%[/{mastery_color}] mastery")
+
+        # Show personalized learning path recommendations (adaptive mode)
+        if adaptive:
+            from core.adaptive_teaching import AdaptiveTeachingManager
+            atm = AdaptiveTeachingManager()
+            learning_path = atm.get_personalized_learning_path(course_code, limit=3)
+
+            if learning_path:
+                console.print("\n[bold]📚 Recommended Next Steps:[/bold]")
+                for item in learning_path:
+                    action = item.get('action', 'practice')
+                    action_emoji = {
+                        'review': '🔄', 'strengthen': '💪',
+                        'learn': '📖', 'practice': '✏️'
+                    }.get(action, '→')
+                    name = item.get('core_loop_name') or item.get('topic_name', 'Unknown')
+                    reason = item.get('reason', '')
+                    console.print(f"  {action_emoji} {action.capitalize()}: [cyan]{name}[/cyan]")
+                    if reason:
+                        console.print(f"     [dim]{reason}[/dim]")
 
         console.print(f"\n[dim]Session ID: {session.session_id}[/dim]\n")
 
