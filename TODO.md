@@ -85,39 +85,46 @@
   - `material_exercise_links` table (link worked examples to practice exercises)
   - Database methods: store, link, retrieve materials and relationships
 
-- [ ] **Smart Splitter as Content Classifier** 🚧 NEXT
-  - Update `_build_detection_prompt()` to classify content as:
-    - `theory` - Explanatory sections, definitions, concepts
-    - `worked_example` - Examples with solutions shown
-    - `practice_exercise` - Problems to solve (existing exercises)
-  - Update `_parse_detection_response()` to return `DetectedContent` objects
-  - Update `split_pdf_content()` to return BOTH exercises and learning_materials
-  - Keep pattern-based splitting for structured exams (no regression)
+- [x] **Smart Splitter as Content Classifier** ✅ (completed 2025-11-24)
+  - Updated `_build_detection_prompt()` to classify as theory/worked_example/practice_exercise
+  - Updated `_parse_detection_response()` to return `DetectedContent` objects
+  - Updated `split_pdf_content()` to return BOTH exercises and learning_materials
+  - Pattern-based splitting preserved for structured exams (no regression)
 
-- [ ] **Ingestion Mode: --material-type flag**
-  - Add `--material-type exams|notes` flag to `ingest` command (NOT `--type`, avoid quiz confusion)
-  - For `--material-type exams`:
-    - Default: pattern-based splitting (fast, free)
-    - Optional: `--smart-split` for edge cases
-  - For `--material-type notes`:
-    - Default: smart splitting enabled
-    - Populate learning_materials (theory + worked examples) + exercises (practice)
-  - Update ingestion to store learning_materials in database via new methods
+- [x] **Ingestion Mode: --material-type flag** ✅ (completed 2025-11-24)
+  - Added `--material-type exams|notes` flag to `ingest` command
+  - For `--material-type exams`: Pattern-based (default), optional `--smart-split`
+  - For `--material-type notes`: Smart splitting enabled automatically
+  - Stores learning_materials in database via new methods
 
-- [ ] **Topic-Aware Material Linker**
-  - Enhance analyzer to detect topics for learning materials (like exercises)
-  - Call `db.link_material_to_topic()` during analysis
-  - Link worked examples to similar exercises via `db.link_material_to_exercise()`
-  - Use semantic matching to find related content
+- [x] **Topic-Aware Material Linker** ✅ (completed 2025-11-24)
+  - `analyze_learning_material()` - mirrors exercise analysis
+  - `link_materials_to_topics()` - semantic matching to existing topics
+  - `link_worked_examples_to_exercises()` - similarity-based linking
+  - CLI command: `examina link-materials --course CODE`
 
-- [ ] **Tutor: Theory → Worked Example → Practice Flow**
-  - Update `core/tutor.py` `learn()` method:
-    - When learning a topic/core loop:
-      1. Fetch and show theory materials (`db.get_learning_materials_by_topic(type='theory')`)
-      2. Show worked examples (`db.get_learning_materials_by_topic(type='worked_example')`)
-      3. Then show practice exercises (existing behavior)
-  - Implement "explain → show → do" pattern
-  - Link worked examples to similar exercises as hints
+- [x] **Tutor: Theory → Worked Example → Practice Flow** ✅ (completed 2025-11-24)
+  - Enhanced `learn()` method with theory and worked example display
+  - Configurable parameters: show_theory, show_worked_examples, max_theory_sections, max_worked_examples
+  - Defaults from Config (SHOW_THEORY_BY_DEFAULT, MAX_THEORY_SECTIONS_IN_LEARN, etc.)
+  - Bilingual support (en/it) for theory and example display
+  - Graceful fallback when no materials exist
+
+**Refinements Completed (2025-11-24):**
+
+- [x] **Configuration System** ✅
+  - Added 7 Phase 10 config constants (LEARNING_MATERIALS_ENABLED, SHOW_THEORY_BY_DEFAULT, etc.)
+  - All configurable via environment variables
+  - Moved hardcoded 0.3 threshold to Config.WORKED_EXAMPLE_EXERCISE_SIMILARITY_THRESHOLD
+
+- [x] **Tutor Configurability** ✅
+  - Added show_theory, show_worked_examples, max_theory_sections, max_worked_examples parameters
+  - Theory → example → practice is default flow (not conditional)
+  - Documented in docstring and implementation
+
+- [x] **Database Method Enhancement** ✅
+  - Added limit parameter to get_learning_materials_by_topic()
+  - Tutor respects max limits when fetching materials
 
 **Design Constraints:**
 - ✅ No regression on existing exercise-based features (analysis, quiz, spaced repetition)

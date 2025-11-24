@@ -153,19 +153,33 @@ if examples:
 
 ## Summary: What Needs Adjustment
 
-### High Priority
+### ✅ Completed Refinements (2025-11-24)
 
-1. **Tutor Flow Refinement**
-   - Verify theory → example → practice is DEFAULT flow
-   - Add configurability parameters (`show_theory`, `max_theory`, `max_examples`)
-   - Document that this IS the learning script, not "if materials available"
+1. **Tutor Flow Refinement** ✅ COMPLETED
+   - ✅ Verified theory → example → practice is DEFAULT flow
+   - ✅ Added configurability parameters (`show_theory`, `show_worked_examples`, `max_theory_sections`, `max_worked_examples`)
+   - ✅ Documented that this IS the learning script (docstring updated)
+   - ✅ Defaults loaded from Config (configurable via env vars)
 
-### Medium Priority
+2. **Analyzer Configuration** ✅ COMPLETED
+   - ✅ Moved hardcoded similarity threshold (0.3) to config
+   - ✅ Added `Config.WORKED_EXAMPLE_EXERCISE_SIMILARITY_THRESHOLD` (default: 0.70)
+   - ✅ Configurable via `EXAMINA_WORKED_EXAMPLE_THRESHOLD` env var
 
-2. **Analyzer Configuration**
-   - Move hardcoded similarity threshold (0.3) to config
-   - Add `Config.WORKED_EXAMPLE_EXERCISE_SIMILARITY_THRESHOLD`
-   - Consider tracking link quality/confidence
+3. **Database Method Enhancement** ✅ COMPLETED
+   - ✅ Added `limit` parameter to `get_learning_materials_by_topic()`
+   - ✅ Tutor uses max limits from Config when fetching materials
+
+4. **Configuration System** ✅ COMPLETED
+   - ✅ Added 7 new Phase 10 configuration constants to config.py
+   - ✅ All defaults configurable via environment variables
+   - ✅ Aligned with existing config patterns
+
+### Future Considerations
+
+1. **Link Quality Tracking** (Optional Enhancement)
+   - Consider tracking link quality/confidence in material_exercise_links table
+   - Could add confidence_score column for future filtering
 
 ### Low Priority
 
@@ -183,26 +197,26 @@ Before marking Phase 10 complete, verify:
 
 ### Design Principles
 
-- [ ] Smart splitter acts as classifier (not storage pipeline)
-- [ ] Ingestion modes describe document type (not algorithm)
-- [ ] Topic linking treats materials and exercises symmetrically
-- [ ] Tutor flow is explicit and configurable
-- [ ] No regression in exam pipeline
+- [x] Smart splitter acts as classifier (not storage pipeline) - ✅ Implemented (returns SplitResult)
+- [x] Ingestion modes describe document type (not algorithm) - ✅ Implemented (--material-type flag)
+- [x] Topic linking treats materials and exercises symmetrically - ✅ Implemented (analyze_learning_material mirrors analyze_exercise)
+- [x] Tutor flow is explicit and configurable - ✅ COMPLETED (added show_theory, max_theory_sections, etc.)
+- [x] No regression in exam pipeline - ✅ Pattern-based remains default for exams
 
 ### Functional Requirements
 
-- [ ] Pattern-based splitting still works for structured exams
-- [ ] Notes ingestion creates theory and worked examples
-- [ ] Materials link to multiple topics (many-to-many)
-- [ ] Worked examples link to relevant exercises
-- [ ] Tutor shows theory → examples → practice
+- [x] Pattern-based splitting still works for structured exams - ✅ Default for --material-type exams
+- [x] Notes ingestion creates theory and worked examples - ✅ Smart splitter creates LearningMaterial objects
+- [x] Materials link to multiple topics (many-to-many) - ✅ material_topics join table
+- [x] Worked examples link to relevant exercises - ✅ link_worked_examples_to_exercises method
+- [x] Tutor shows theory → examples → practice - ✅ COMPLETED (default flow with graceful fallback)
 
 ### Configuration
 
-- [ ] All thresholds in `Config`, not hardcoded
-- [ ] Provider-agnostic (LLMManager)
-- [ ] Bilingual support maintained
-- [ ] Web-ready design (separation of concerns)
+- [x] All thresholds in `Config`, not hardcoded - ✅ COMPLETED (moved 0.3 threshold to Config)
+- [x] Provider-agnostic (LLMManager) - ✅ All methods use LLMManager
+- [x] Bilingual support maintained - ✅ Tutor display methods support en/it
+- [x] Web-ready design (separation of concerns) - ✅ Core logic separate from CLI
 
 ### Success Criteria
 
