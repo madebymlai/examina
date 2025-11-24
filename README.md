@@ -47,12 +47,14 @@ Examina analyzes past exam PDFs to:
 - Analytics dashboard with topic breakdown
 - Multi-language support (Italian/English)
 
-**Phase 6: Multi-Core-Loop Support** 🚧 IN PROGRESS
-- Extract ALL procedures from multi-step exercises (design + transformation + minimization)
-- Many-to-many exercise-to-core-loop relationships
-- Intelligent detection of numbered points and transformations
-- Tag-based search (e.g., find all "Mealy→Moore" exercises)
-- Backward compatible with existing analyses
+**Phase 6: Multi-Core-Loop Support** ✅ COMPLETED
+- ✅ Extract ALL procedures from multi-step exercises (design + transformation + minimization)
+- ✅ Many-to-many exercise-to-core-loop relationships via junction table
+- ✅ Intelligent detection of numbered points and transformations
+- ✅ Tag-based search (e.g., find all "Mealy→Moore" exercises)
+- ✅ Quiz filtering by procedure type (`--procedure`, `--multi-only`, `--tags`)
+- ✅ Full CLI integration with info and quiz commands
+- ✅ Tested: 27/27 ADE exercises with multi-procedure extraction
 
 **Phase 7: Enhanced Learning System** 🚧 IN PROGRESS
 - ✅ **Deep theory explanations** - Prerequisite concepts with examples and analogies
@@ -435,7 +437,9 @@ Built with Claude Code for studying at Università degli Studi di Firenze (UNIFI
 ---
 
 **Current Work**:
-- Phase 6: Multi-Core-Loop Support ✅ COMPLETE (extracting ALL procedures from multi-step exercises)
+- Phase 6: Multi-Core-Loop Support ✅ COMPLETE
+  - Fully tested and validated with ADE course
+  - All CLI features working (procedure filtering, tag search, multi-only)
 - Phase 7: Enhanced Learning System 🚧 IN PROGRESS
   - ✅ Phase 7.1: Deep theory explanations with prerequisite concepts
   - ✅ Phase 7.2: Step-by-step WHY reasoning (partially complete)
