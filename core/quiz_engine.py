@@ -80,7 +80,8 @@ class QuizEngine:
         procedure_type: Optional[str] = None,
         multi_only: bool = False,
         tags: Optional[str] = None,
-        exercise_type: Optional[str] = None
+        exercise_type: Optional[str] = None,
+        adaptive: bool = False
     ) -> QuizSession:
         """Create a new quiz session.
 
@@ -95,6 +96,8 @@ class QuizEngine:
             multi_only: If True, only include exercises with multiple procedures
             tags: Optional tag filter (comma-separated)
             exercise_type: Optional exercise type filter (procedural, theory, proof)
+            adaptive: If True, select exercises based on mastery distribution
+                      (40% weak, 40% learning, 20% strong)
 
         Returns:
             QuizSession object
@@ -102,7 +105,9 @@ class QuizEngine:
         session_id = str(uuid.uuid4())
 
         # Determine quiz type
-        if review_only:
+        if adaptive:
+            quiz_type = 'adaptive'
+        elif review_only:
             quiz_type = 'review'
         elif multi_only:
             quiz_type = 'multi_procedure'
@@ -116,18 +121,27 @@ class QuizEngine:
             quiz_type = 'random'
 
         # Select exercises
-        exercises = self._select_exercises(
-            course_code=course_code,
-            num_questions=num_questions,
-            topic=topic,
-            core_loop=core_loop,
-            difficulty=difficulty,
-            review_only=review_only,
-            procedure_type=procedure_type,
-            multi_only=multi_only,
-            tags=tags,
-            exercise_type=exercise_type
-        )
+        if adaptive:
+            # Use mastery-based selection (40% weak, 40% learning, 20% strong)
+            exercises = self._select_exercises_adaptive(
+                course_code=course_code,
+                num_questions=num_questions,
+                topic=topic,
+                core_loop=core_loop
+            )
+        else:
+            exercises = self._select_exercises(
+                course_code=course_code,
+                num_questions=num_questions,
+                topic=topic,
+                core_loop=core_loop,
+                difficulty=difficulty,
+                review_only=review_only,
+                procedure_type=procedure_type,
+                multi_only=multi_only,
+                tags=tags,
+                exercise_type=exercise_type
+            )
 
         if not exercises:
             raise ValueError("No exercises found matching the criteria")
@@ -339,6 +353,129 @@ class QuizEngine:
                 random.shuffle(selected)
 
             return selected
+
+    def _select_exercises_adaptive(
+        self,
+        course_code: str,
+        num_questions: int,
+        topic: Optional[str] = None,
+        core_loop: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Select exercises based on mastery distribution.
+
+        Distribution:
+        - 40% weak (mastery < 0.4) - reinforce gaps
+        - 40% learning (0.4-0.7) - build proficiency
+        - 20% strong (> 0.7) - maintain mastery
+
+        Args:
+            course_code: Course code
+            num_questions: Number of questions needed
+            topic: Optional topic filter
+            core_loop: Optional core loop filter
+
+        Returns:
+            List of exercise dictionaries balanced by mastery
+        """
+        from core.mastery_aggregator import MasteryAggregator
+
+        # Calculate distribution
+        n_weak = max(1, int(num_questions * 0.4))
+        n_learning = max(1, int(num_questions * 0.4))
+        n_strong = num_questions - n_weak - n_learning
+
+        selected = []
+
+        with Database() as db:
+            aggregator = MasteryAggregator(db)
+
+            # Base query for exercises with mastery info
+            base_query = """
+                SELECT DISTINCT
+                    e.id, e.text, e.difficulty, e.core_loop_id,
+                    t.name as topic_name,
+                    COALESCE(er.mastery_level, 'new') as mastery_level,
+                    CASE
+                        WHEN er.mastery_level = 'mastered' THEN 1.0
+                        WHEN er.mastery_level = 'reviewing' THEN 0.66
+                        WHEN er.mastery_level = 'learning' THEN 0.33
+                        ELSE 0.0
+                    END as mastery_score
+                FROM exercises e
+                LEFT JOIN topics t ON e.topic_id = t.id
+                LEFT JOIN exercise_reviews er ON e.id = er.exercise_id
+                WHERE e.course_code = ?
+                    AND e.analyzed = 1
+                    AND e.low_confidence_skipped = 0
+            """
+            params = [course_code]
+
+            if topic:
+                base_query += " AND t.name LIKE ?"
+                params.append(f"%{topic}%")
+
+            if core_loop:
+                base_query += """ AND e.id IN (
+                    SELECT exercise_id FROM exercise_core_loops ecl
+                    JOIN core_loops cl ON ecl.core_loop_id = cl.id
+                    WHERE cl.id = ? OR cl.name LIKE ?
+                )"""
+                params.append(core_loop)
+                params.append(f"%{core_loop}%")
+
+            # Get weak exercises (new or learning with low score)
+            weak_query = base_query + """
+                AND (er.mastery_level IS NULL
+                     OR er.mastery_level = 'new'
+                     OR er.mastery_level = 'learning')
+                ORDER BY RANDOM()
+                LIMIT ?
+            """
+            weak_params = params + [n_weak]
+            weak_results = db.conn.execute(weak_query, weak_params).fetchall()
+            selected.extend([dict(r) for r in weak_results])
+
+            # Get learning exercises (reviewing, working on it)
+            learning_query = base_query + """
+                AND er.mastery_level = 'reviewing'
+                ORDER BY RANDOM()
+                LIMIT ?
+            """
+            learning_params = params + [n_learning]
+            learning_results = db.conn.execute(learning_query, learning_params).fetchall()
+            selected.extend([dict(r) for r in learning_results])
+
+            # Get strong exercises (mastered, for maintenance)
+            strong_query = base_query + """
+                AND er.mastery_level = 'mastered'
+                ORDER BY RANDOM()
+                LIMIT ?
+            """
+            strong_params = params + [n_strong]
+            strong_results = db.conn.execute(strong_query, strong_params).fetchall()
+            selected.extend([dict(r) for r in strong_results])
+
+            # If we don't have enough in each category, fill from any available
+            if len(selected) < num_questions:
+                existing_ids = {ex['id'] for ex in selected}
+                fill_query = base_query + """
+                    ORDER BY RANDOM()
+                    LIMIT ?
+                """
+                fill_params = params + [num_questions * 2]
+                fill_results = db.conn.execute(fill_query, fill_params).fetchall()
+
+                for row in fill_results:
+                    if row['id'] not in existing_ids:
+                        selected.append(dict(row))
+                        existing_ids.add(row['id'])
+                        if len(selected) >= num_questions:
+                            break
+
+            # Shuffle final selection
+            random.shuffle(selected)
+
+            return selected[:num_questions]
 
     def evaluate_answer(
         self,

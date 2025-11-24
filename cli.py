@@ -2214,6 +2214,8 @@ def prove(course, interactive, lang, provider, profile):
 @click.option('--difficulty', '-d', type=click.Choice(['easy', 'medium', 'hard']),
               help='Filter by difficulty')
 @click.option('--review-only', is_flag=True, help='Only exercises due for review')
+@click.option('--adaptive', '-a', is_flag=True,
+              help='Adaptive selection based on mastery (40% weak, 40% learning, 20% strong)')
 @click.option('--procedure', '-p',
               type=click.Choice(['design', 'transformation', 'verification', 'minimization', 'analysis', 'implementation']),
               help='Filter by procedure type')
@@ -2227,7 +2229,7 @@ def prove(course, interactive, lang, provider, profile):
               default=None, help='LLM provider (overrides profile routing)')
 @click.option('--profile', type=click.Choice(['free', 'pro', 'local']),
               default=None, help='Provider profile for routing (free/pro/local). Uses EXAMINA_PROVIDER_PROFILE if not specified.')
-def quiz(course, questions, topic, loop, difficulty, review_only, procedure, multi_only, tags, exercise_type, lang, provider, profile):
+def quiz(course, questions, topic, loop, difficulty, review_only, adaptive, procedure, multi_only, tags, exercise_type, lang, provider, profile):
     """Take an interactive quiz to test your knowledge."""
     from core.quiz_engine import QuizEngine
     from models.llm_manager import LLMManager
@@ -2273,7 +2275,8 @@ def quiz(course, questions, topic, loop, difficulty, review_only, procedure, mul
                 procedure_type=procedure,
                 multi_only=multi_only,
                 tags=tags,
-                exercise_type=exercise_type
+                exercise_type=exercise_type,
+                adaptive=adaptive
             )
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]\n")
@@ -2282,6 +2285,8 @@ def quiz(course, questions, topic, loop, difficulty, review_only, procedure, mul
 
         # Display quiz info
         quiz_info = f"📝 Quiz Session: {session.total_questions} questions"
+        if adaptive:
+            quiz_info += " | Mode: Adaptive (mastery-based)"
         if topic:
             quiz_info += f" | Topic: {topic}"
         if loop:
