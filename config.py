@@ -110,6 +110,11 @@ class Config:
     AUTO_MERGE_TRANSLATIONS = os.getenv("EXAMINA_AUTO_MERGE_TRANSLATIONS", "true").lower() == "true"  # Merge cross-language duplicates automatically
     LANGUAGE_CACHE_TTL = int(os.getenv("EXAMINA_LANGUAGE_CACHE_TTL", "86400"))  # Cache language detection for 24 hours
 
+    # Monolingual Mode Settings (Phase 6 TODO)
+    # Strictly monolingual analysis - ensure all procedures are in single language
+    # Prevents cross-language duplicates by detecting and translating procedures to primary language
+    MONOLINGUAL_MODE_ENABLED = os.getenv("EXAMINA_MONOLINGUAL_ENABLED", "false").lower() == "true"  # Default: OFF (bilingual mode)
+
     # Smart Splitting Settings (Phase: Enhanced Exercise Splitting)
     # LLM-based exercise detection for unstructured materials (lecture notes, embedded examples)
     # Complements pattern-based splitting with AI detection for edge cases

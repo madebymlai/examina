@@ -95,15 +95,30 @@ class AnalysisResult:
 class ExerciseAnalyzer:
     """Analyzes exercises using LLM to discover topics and core loops."""
 
-    def __init__(self, llm_manager: Optional[LLMManager] = None, language: str = "en"):
+    def __init__(self, llm_manager: Optional[LLMManager] = None, language: str = "en", monolingual: bool = False):
         """Initialize analyzer.
 
         Args:
             llm_manager: LLM manager instance
             language: Output language for analysis ("en" or "it")
+            monolingual: Enable strictly monolingual mode (all procedures in single language)
         """
         self.llm = llm_manager or LLMManager()
         self.language = language
+        self.monolingual = monolingual
+        self.primary_language = None  # Will be detected from course metadata/exercises
+
+        # Initialize translation detector for monolingual mode
+        self.translation_detector = None
+        if self.monolingual:
+            try:
+                from core.translation_detector import TranslationDetector
+                self.translation_detector = TranslationDetector(llm_manager=self.llm)
+                print("[INFO] Translation detector initialized for monolingual mode")
+            except Exception as e:
+                print(f"[WARNING] Failed to initialize TranslationDetector for monolingual mode: {e}")
+                print("  Monolingual mode will be disabled")
+                self.monolingual = False  # Disable if can't initialize
 
         # Initialize semantic matcher if available
         if SEMANTIC_MATCHING_AVAILABLE and Config.SEMANTIC_SIMILARITY_ENABLED:
@@ -183,6 +198,10 @@ class ExerciseAnalyzer:
                 point_number=None,
                 transformation=None
             ))
+
+        # Normalize procedures to primary language if monolingual mode enabled
+        if self.monolingual and procedures:
+            procedures = self._normalize_procedures_to_primary_language(procedures)
 
         # Phase 9.1: Extract exercise type information
         exercise_type = data.get("exercise_type", "procedural")
@@ -453,6 +472,134 @@ Respond ONLY with valid JSON, no other text.
             proof_keywords=None,
             theory_metadata=None
         )
+
+    def _detect_primary_language(self, exercises: List[Dict[str, Any]], course_name: str) -> str:
+        """Detect the primary language of the course.
+
+        Args:
+            exercises: List of exercise dicts
+            course_name: Course name for additional context
+
+        Returns:
+            Primary language code (e.g., "english", "italian")
+        """
+        if not self.translation_detector:
+            # Fallback to analysis language if no detector
+            return "english" if self.language == "en" else "italian"
+
+        # Sample first few exercises to detect language
+        sample_size = min(5, len(exercises))
+        language_counts = {}
+
+        for exercise in exercises[:sample_size]:
+            text = exercise.get('text', '')
+            if not text:
+                continue
+
+            detected_lang = self.translation_detector.detect_language(text)
+            if detected_lang and detected_lang != "unknown":
+                language_counts[detected_lang] = language_counts.get(detected_lang, 0) + 1
+
+        # Get most common language
+        if language_counts:
+            primary_lang = max(language_counts, key=language_counts.get)
+            print(f"[INFO] Detected primary course language: {primary_lang} (from {sample_size} exercises)")
+            return primary_lang
+        else:
+            # Fallback to analysis language
+            fallback = "english" if self.language == "en" else "italian"
+            print(f"[INFO] Could not detect language, using fallback: {fallback}")
+            return fallback
+
+    def _translate_procedure(self, procedure_info: ProcedureInfo, target_language: str) -> ProcedureInfo:
+        """Translate a procedure to target language.
+
+        Args:
+            procedure_info: Procedure to translate
+            target_language: Target language (e.g., "english", "italian")
+
+        Returns:
+            Translated ProcedureInfo
+        """
+        if not self.llm:
+            return procedure_info
+
+        # Build translation prompt
+        prompt = f"""Translate this procedure name and steps to {target_language}.
+Maintain technical accuracy and preserve the exact meaning.
+
+Original procedure:
+Name: {procedure_info.name}
+Type: {procedure_info.type}
+Steps:
+{chr(10).join([f"{i+1}. {step}" for i, step in enumerate(procedure_info.steps)])}
+
+Return ONLY valid JSON in this format:
+{{
+  "name": "translated procedure name",
+  "steps": ["translated step 1", "translated step 2", ...]
+}}
+
+No markdown code blocks, just JSON."""
+
+        try:
+            response = self.llm.generate(
+                prompt=prompt,
+                temperature=0.3,
+                json_mode=True
+            )
+
+            if response.success:
+                data = self.llm.parse_json_response(response)
+                if data and 'name' in data and 'steps' in data:
+                    return ProcedureInfo(
+                        name=data['name'],
+                        type=procedure_info.type,
+                        steps=data['steps'],
+                        point_number=procedure_info.point_number,
+                        transformation=procedure_info.transformation
+                    )
+        except Exception as e:
+            print(f"[WARNING] Failed to translate procedure '{procedure_info.name}': {e}")
+
+        # Fallback: return original
+        return procedure_info
+
+    def _normalize_procedures_to_primary_language(self, procedures: List[ProcedureInfo]) -> List[ProcedureInfo]:
+        """Normalize all procedures to primary language in monolingual mode.
+
+        Args:
+            procedures: List of procedures to normalize
+
+        Returns:
+            List of procedures in primary language
+        """
+        if not self.monolingual or not self.primary_language or not self.translation_detector:
+            return procedures
+
+        normalized_procedures = []
+
+        for proc in procedures:
+            # Detect language of procedure
+            proc_language = self.translation_detector.detect_language(proc.name)
+
+            if proc_language == "unknown":
+                # Can't detect, keep as is
+                normalized_procedures.append(proc)
+                continue
+
+            # Check if procedure is in primary language
+            if proc_language.lower() == self.primary_language.lower():
+                # Already in primary language
+                normalized_procedures.append(proc)
+            else:
+                # Translate to primary language
+                print(f"[MONOLINGUAL] Translating procedure '{proc.name}' from {proc_language} to {self.primary_language}")
+                translated_proc = self._translate_procedure(proc, self.primary_language)
+                print(f"  → '{translated_proc.name}'")
+                normalized_procedures.append(translated_proc)
+
+        return normalized_procedures
 
     def merge_exercises(self, exercises: List[Dict[str, Any]], skip_analyzed: bool = False) -> List[Dict[str, Any]]:
         """Merge exercise fragments into complete exercises.
@@ -734,6 +881,14 @@ Respond ONLY with valid JSON, no other text.
 
             if not exercises:
                 return {"topics": {}, "core_loops": {}}
+
+            # Detect primary language if monolingual mode enabled
+            if self.monolingual and not self.primary_language:
+                course = db.get_course(course_code)
+                course_name = course['name'] if course else course_code
+                self.primary_language = self._detect_primary_language(exercises, course_name)
+                print(f"[MONOLINGUAL MODE] Primary language set to: {self.primary_language}")
+                print(f"  All procedures will be normalized to {self.primary_language}\n")
 
             # Merge fragments first - use parallel or sequential mode
             if use_parallel:

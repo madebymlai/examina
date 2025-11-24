@@ -627,7 +627,9 @@ def ingest(course, zip_file, material_type, smart_split, provider, profile):
               help='Use parallel batch processing for better performance (default: parallel)')
 @click.option('--batch-size', '-b', type=int, default=None,
               help=f'Batch size for parallel processing (default: {Config.BATCH_SIZE})')
-def analyze(course, limit, provider, profile, lang, force, parallel, batch_size):
+@click.option('--monolingual', is_flag=True,
+              help='Enable strictly monolingual mode - all procedures will be in single language (prevents cross-language duplicates)')
+def analyze(course, limit, provider, profile, lang, force, parallel, batch_size, monolingual):
     """Analyze exercises with AI to discover topics and core loops."""
     console.print(f"\n[bold cyan]Analyzing exercises for {course}...[/bold cyan]\n")
 
@@ -700,9 +702,10 @@ def analyze(course, limit, provider, profile, lang, force, parallel, batch_size)
             effective_provider = Config.LLM_PROVIDER
 
         # Initialize components
-        console.print(f"🤖 Initializing AI components (provider: {effective_provider}, language: {lang})...")
+        mode_str = f"language: {lang}, monolingual: {'ON' if monolingual else 'OFF'}"
+        console.print(f"🤖 Initializing AI components (provider: {effective_provider}, {mode_str})...")
         llm = LLMManager(provider=effective_provider)
-        analyzer = ExerciseAnalyzer(llm, language=lang)
+        analyzer = ExerciseAnalyzer(llm, language=lang, monolingual=monolingual)
 
         # Initialize translation detector for language detection
         from core.translation_detector import TranslationDetector
@@ -796,7 +799,10 @@ def analyze(course, limit, provider, profile, lang, force, parallel, batch_size)
             for topic_name in topics.keys():
                 # Detect language if translation detector is available
                 topic_language = None
-                if translation_detector:
+                if monolingual and analyzer.primary_language:
+                    # In monolingual mode, use the detected primary language
+                    topic_language = analyzer.primary_language
+                elif translation_detector:
                     topic_language = translation_detector.detect_language(topic_name)
                     if topic_language == "unknown":
                         topic_language = None  # Store NULL instead of "unknown"
@@ -819,7 +825,10 @@ def analyze(course, limit, provider, profile, lang, force, parallel, batch_size)
                     if topic_id:
                         # Detect language if translation detector is available
                         loop_language = None
-                        if translation_detector:
+                        if monolingual and analyzer.primary_language:
+                            # In monolingual mode, use the detected primary language
+                            loop_language = analyzer.primary_language
+                        elif translation_detector:
                             loop_language = translation_detector.detect_language(loop_data['name'])
                             if loop_language == "unknown":
                                 loop_language = None  # Store NULL instead of "unknown"
