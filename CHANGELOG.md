@@ -5,6 +5,13 @@ All notable changes and completed phases are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2025-11-24
+
+### Fixed
+- **Removed hardcoded inverse transformations** - Replaced hardcoded SEMANTIC_OPPOSITES entries with generic `is_inverse_transformation()` algorithm
+- Generic detection now works for ANY transformation pair (e.g., RGB↔CMYK, Polar↔Cartesian) without hardcoding
+- Supports multiple patterns: "A to B", "A→B", "A->B", "A into B", Italian "conversione A B"
+
 ## [0.9.0] - 2025-11-24
 
 ### Added
@@ -12,7 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Theory categorization** - 7 categories (definition, theorem, axiom, property, explanation, derivation, concept)
 - **Proof learning system** - 5 proof techniques with step-by-step guidance
 - **Deduplication improvements** - Merge chain resolution, foreign key fixes, reduced false positives by 56%
-- **Inverse transformation protection** - Prevents merging Mealy→Moore with Moore→Mealy transformations
 - CLI `--type` filter for quizzes
 - CLI `prove` command for interactive proof practice
 
@@ -21,7 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Foreign key constraints when merging topics (updates all 5 referencing tables)
 - UNIQUE constraint violations in core loop merges
 - Translation detection false positives (now requires 2+ pairs instead of 1)
-- Mealy/Moore inverse transformation merging
 
 ### Changed
 - README.md restructured (448 → 255 lines) - focused on quick start
