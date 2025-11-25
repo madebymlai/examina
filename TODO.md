@@ -296,19 +296,37 @@
   - Version and publish to PyPI (private or public)
   - Private repo can import: `from examina_core import Analyzer, Tutor`
 
-- [ ] **Phase 2: API Layer** (Private Repo)
-  - FastAPI REST API
-  - Wrap `examina-core` functions as API endpoints
-  - JWT authentication
-  - Rate limiting (per-user, not per-provider)
-  - Multi-tenancy (user_id isolation)
-  - **Background Job System:**
+- [x] **Phase 2: API Layer** (Private Repo) ✅ IN PROGRESS
+  - [x] FastAPI REST API (examina-cloud/backend)
+  - [x] Wrap `examina-core` functions as API endpoints
+  - [x] JWT authentication (Phase 2.1)
+  - [ ] Rate limiting (per-user, not per-provider)
+  - [x] Multi-tenancy (user_id isolation)
+  - [x] **Phase 2.1: Core Setup** ✅ (2025-11-25)
+    - SQLAlchemy async models (User, Course, Topic, CoreLoop, Exercise, Quiz)
+    - JWT authentication middleware
+    - Dependency injection for Database, LLMManager
+    - Error handling and validation
+  - [x] **Phase 2.2: Read-Only Endpoints** ✅ (2025-11-25)
+    - GET /courses, /courses/{code}, /exercises, /progress
+  - [x] **Phase 2.3: Learning & Quiz** ✅ (2025-11-25)
+    - GET /learn/core-loop/{id}, /learn/practice
+    - POST /learn/practice/evaluate, /learn/generate
+    - POST /quiz/sessions, /quiz/sessions/{id}/answer, /quiz/sessions/{id}/complete
+  - [x] **Phase 2.4: Background Jobs** ✅ (2025-11-25)
     - Celery + Redis for async task queue
-    - Background workers for long-running analysis
-    - Job status polling endpoint (`GET /jobs/{id}`)
-    - WebSocket for real-time progress updates
-    - Streaming pipeline (exercise → analyze → dedupe → store)
+    - Background workers for PDF ingestion and analysis
+    - Job model and status tracking
+    - POST /ingest/upload, /analyze/start
+    - GET /jobs, /jobs/{id}
     - Retry logic with exponential backoff
+  - [x] **Phase 2.5: Admin & Premium** ✅ (2025-11-25)
+    - [x] Step 1: Subscription model & schemas (foundation)
+    - [x] Step 2: Rate limiting infrastructure (Redis sliding window)
+    - [x] Step 3: Stripe integration service
+    - [x] Step 4: Billing endpoints (subscribe, portal, webhook)
+    - [x] Step 5: Admin endpoints (deduplicate, users, stats)
+    - [x] Step 6: Apply rate limits to LLM endpoints
 
 - [ ] **Phase 2.5: UI/UX Design** (Figma)
   - Create comprehensive Figma AI prompt covering all features:
@@ -351,7 +369,7 @@
 
 **All new code MUST follow these principles:**
 
-1. **No Hardcoding** ✓ (already enforced)
+1. **No Hardcoding** ✓ 
    - No hardcoded course codes, provider names, or configuration
    - All settings via environment variables or database
 

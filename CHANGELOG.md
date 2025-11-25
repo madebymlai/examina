@@ -5,6 +5,111 @@ All notable changes and completed phases are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2025-11-25
+
+### Added - Web API Layer (Phase 2)
+
+**examina-cloud/backend** - FastAPI REST API wrapping examina-core for SaaS deployment.
+
+#### Phase 2.1: Core Setup
+- SQLAlchemy async models for PostgreSQL (User, Course, Topic, CoreLoop, Exercise, Quiz, Job)
+- JWT authentication with access/refresh tokens
+- Dependency injection for database sessions and ExaminaService
+- Multi-tenant data isolation (all queries scoped by user_id)
+
+#### Phase 2.2: Read-Only Endpoints
+- `GET /api/v1/courses` - List user's courses
+- `GET /api/v1/courses/{code}` - Course details with topics
+- `GET /api/v1/exercises` - List/filter exercises
+- `GET /api/v1/progress/{code}/summary` - Learning progress stats
+
+#### Phase 2.3: Learning & Quiz Endpoints
+- `GET /api/v1/learn/core-loop/{id}` - Adaptive learning content (wraps Tutor.learn)
+- `GET /api/v1/learn/practice` - Get practice exercise
+- `POST /api/v1/learn/practice/evaluate` - AI answer evaluation
+- `POST /api/v1/learn/generate` - Generate new exercise variations
+- `POST /api/v1/quiz/sessions` - Create quiz session
+- `POST /api/v1/quiz/sessions/{id}/answer` - Submit answer
+- `POST /api/v1/quiz/sessions/{id}/complete` - Complete quiz
+
+#### Phase 2.4: Background Jobs
+- **Celery + Redis** task queue for long-running operations
+- **Job model** for tracking task status, progress, and results
+- `POST /api/v1/ingest/upload` - PDF upload and processing (async)
+- `POST /api/v1/analyze/start` - Start exercise analysis job
+- `GET /api/v1/jobs` - List background jobs with filtering
+- `GET /api/v1/jobs/{id}` - Job status and progress
+- Retry logic with exponential backoff
+- Multi-tenant job isolation
+
+### Technical Details
+- **Backend**: FastAPI with async SQLAlchemy (asyncpg)
+- **Database**: PostgreSQL with UUID primary keys
+- **Auth**: JWT tokens with bcrypt password hashing
+- **Tasks**: Celery workers with Redis broker
+- **Config**: Environment-based settings via pydantic-settings
+
+### Files Added (examina-cloud/backend)
+```
+app/
+├── api/v1/
+│   ├── learn.py (~390 lines)
+│   ├── quiz.py (~584 lines)
+│   ├── jobs.py (~213 lines)
+│   ├── ingest.py (~307 lines)
+│   └── analyze.py (~464 lines)
+├── models/
+│   └── job.py (~160 lines)
+├── schemas/
+│   ├── learn.py (~135 lines)
+│   ├── quiz.py (~272 lines)
+│   └── job.py (~170 lines)
+└── worker/
+    ├── celery_app.py (~60 lines)
+    └── tasks/
+        ├── ingest.py (~420 lines)
+        └── analyze.py (~365 lines)
+```
+
+#### Phase 2.5: Admin & Premium
+- **Subscription System** with Stripe integration
+  - Subscription model tracking tier, status, billing interval
+  - Stripe checkout and customer portal sessions
+  - Webhook handling for subscription lifecycle events
+- **Rate Limiting** with Redis sliding window algorithm
+  - Tier-aware limits (free: 60 req/min, 10 analysis/day vs pro: unlimited)
+  - `RateLimitDependency` for easy endpoint protection
+  - Rate limit headers in responses (X-RateLimit-*)
+- **Billing Endpoints**
+  - `POST /api/v1/billing/subscribe` - Create checkout session
+  - `POST /api/v1/billing/portal` - Billing portal access
+  - `GET /api/v1/billing/status` - Subscription status
+  - `POST /api/v1/billing/webhook` - Stripe webhook handler
+- **Admin Endpoints**
+  - `POST /api/v1/admin/deduplicate` - Trigger deduplication job
+  - `GET /api/v1/admin/users` - List users with filtering
+  - `PATCH /api/v1/admin/users/{id}` - Update user (tier, active, admin)
+  - `GET /api/v1/admin/stats` - System statistics dashboard
+- **Rate-Limited Endpoints**
+  - Learn endpoints: `llm` rate limit (LLM calls)
+  - Quiz endpoints: `quiz` rate limit (session creation)
+  - Analyze/Ingest: `analysis` rate limit (background jobs)
+
+### Files Added (Phase 2.5)
+```
+app/
+├── models/subscription.py (~170 lines)
+├── schemas/billing.py (~230 lines)
+├── core/rate_limiter.py (~450 lines)
+├── services/billing.py (~500 lines)
+├── api/v1/
+│   ├── billing.py (~380 lines)
+│   └── admin.py (~420 lines)
+└── worker/tasks/deduplicate.py (~460 lines)
+```
+
+---
+
 ## [0.14.0] - 2025-11-24
 
 ### Added - Procedure Pattern Caching (Option 3)
