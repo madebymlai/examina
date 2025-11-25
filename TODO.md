@@ -21,8 +21,9 @@
 
 > Backend features that need examina-core support
 
-- [ ] **Source Type Classifier** - LLM-based detection of document type (exam, exercise_sheet, homework, notes)
-  - Input: First few pages of PDF text
+- [ ] **Source Type Classifier** - LLM-based detection of document type
+  - Types: `exam | exercise_sheet | homework` (notes have separate Pro upload screen)
+  - Input: First 3-5 pages only (header/footer usually sufficient)
   - Output: type + confidence score
   - Used by: examina-cloud `/ingest/detect-type` endpoint
 
