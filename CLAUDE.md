@@ -1,0 +1,1 @@
+- always follow rules in ~/git/examina-cloud/.claude/rules.md
