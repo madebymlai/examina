@@ -15,6 +15,7 @@ from core.mastery_aggregator import MasteryAggregator
 from core.adaptive_teaching import AdaptiveTeachingManager
 from core.provider_router import ProviderRouter
 from core.task_types import TaskType
+from core.answer_evaluator import RecallEvaluationResult
 
 __all__ = [
     "ExerciseAnalyzer",
@@ -25,4 +26,5 @@ __all__ = [
     "AdaptiveTeachingManager",
     "ProviderRouter",
     "TaskType",
+    "RecallEvaluationResult",
 ]

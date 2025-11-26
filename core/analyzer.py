@@ -153,20 +153,25 @@ class ExerciseAnalyzer:
                 print("[INFO] Semantic matching disabled in config, using string similarity")
 
     def analyze_exercise(self, exercise_text: str, course_name: str,
-                        previous_exercise: Optional[str] = None) -> AnalysisResult:
+                        previous_exercise: Optional[str] = None,
+                        existing_context: Optional[Dict[str, Any]] = None) -> AnalysisResult:
         """Analyze a single exercise.
 
         Args:
             exercise_text: Exercise text
             course_name: Course name for context
             previous_exercise: Previous exercise text (for merge detection)
+            existing_context: Optional dict with existing entities for context-aware analysis:
+                - topics: List[dict] with {"name": str, "procedure_count": int}
+                - procedures: List[dict] with {"name": str, "type": str}
+                - concepts: List[dict] with {"name": str, "type": str, "topic": str}
 
         Returns:
             AnalysisResult with classification
         """
         # Build prompt
         prompt = self._build_analysis_prompt(
-            exercise_text, course_name, previous_exercise
+            exercise_text, course_name, previous_exercise, existing_context
         )
 
         # Call LLM
@@ -247,13 +252,15 @@ class ExerciseAnalyzer:
         )
 
     def _build_analysis_prompt(self, exercise_text: str, course_name: str,
-                               previous_exercise: Optional[str]) -> str:
+                               previous_exercise: Optional[str],
+                               existing_context: Optional[Dict[str, Any]] = None) -> str:
         """Build prompt for exercise analysis.
 
         Args:
             exercise_text: Exercise text
             course_name: Course name
             previous_exercise: Previous exercise (for merge detection)
+            existing_context: Optional dict with existing topics/procedures/concepts
 
         Returns:
             Prompt string
@@ -281,6 +288,10 @@ PREVIOUS EXERCISE:
 
 Does this exercise appear to be a continuation or sub-part of the previous one?
 """
+
+        # Add existing context if provided (Phase 3: Context Injection)
+        if existing_context:
+            base_prompt += self._build_context_section(existing_context)
 
         # Add language instruction
         language_instruction = {
@@ -333,10 +344,35 @@ IMPORTANT ANALYSIS GUIDELINES:
 
 TOPIC NAMING RULES (CRITICAL):
 - NEVER use the course name "{course_name}" as the topic - it's too generic!
-- Topics MUST be SPECIFIC subtopics within the course (e.g., for Linear Algebra: "Autovalori e Diagonalizzazione", "Sottospazi Vettoriali", "Applicazioni Lineari")
-- Topics should cluster related procedures together (aim for 3-8 core loops per topic)
-- Be as specific as possible - narrow topics are better than broad ones
-- If unsure, prefer more specific over more general
+- Topics should be at CHAPTER/UNIT level - like a section in a textbook or syllabus
+- Topic = PROBLEM DOMAIN (what kind of problems), Procedure = SOLUTION METHOD (how to solve)
+
+TOPIC GRANULARITY TEST:
+Ask: "Would this topic have 3-10 related procedures/methods?"
+- If YES → Good topic level (chapter-level)
+- If only 1 procedure possible → Too specific! Find the broader problem domain
+- If 50+ procedures → Too broad! Split into subtopics
+
+TOPIC vs PROCEDURE PATTERN:
+A TOPIC is a problem domain (broad category).
+A PROCEDURE is a specific method/algorithm used to solve problems in that domain.
+
+Pattern: One topic can have MULTIPLE related procedures:
+- Topic: [Broad Problem Domain]
+  - Procedure: [Method A for this domain]
+  - Procedure: [Method B for this domain]
+  - Procedure: [Conversion between formats in this domain]
+  - Procedure: [Verification/checking in this domain]
+
+BAD TOPIC NAMES (too granular - these should be procedures!):
+- A specific technique name → Should be a procedure under broader topic
+- A single formula/law → Should be a procedure under analysis topic
+- A single conversion method → Should be a procedure under broader topic
+
+GOOD TOPIC NAMES (chapter-level):
+- Broad categories that appear in course syllabus
+- Topics that have multiple related methods/procedures
+- Problem domains, not individual solution techniques
 
 MULTI-PROCEDURE DETECTION:
 - If exercise has numbered points (1., 2., 3.), analyze EACH point separately
@@ -345,16 +381,36 @@ MULTI-PROCEDURE DETECTION:
 - If exercise requires multiple procedures (e.g., "design AND verify"), list ALL of them
 - For transformations/conversions (Mealy→Moore, SOP→POS, etc.), set type="transformation" and fill "transformation" object
 
+PROCEDURE IDENTITY RULES (CRITICAL - when to keep separate vs merge):
+Two procedures are THE SAME if they:
+- Solve the EXACT same problem type with the SAME algorithm
+- Only differ in language or minor phrasing
+
+Two procedures are DIFFERENT (keep separate!) if they:
+- Have different procedure types (design ≠ verify ≠ minimize)
+- Transform in different directions (A→B ≠ B→A)
+- Use fundamentally different algorithms for same goal
+
+MUST STAY SEPARATE (even if in same topic):
+- "Design X" vs "Verify X" vs "Minimize X" (different procedure types)
+- "A to B Conversion" vs "B to A Conversion" (different transformation directions)
+- "Method 1 for X" vs "Method 2 for X" (different algorithms for same goal)
+
+CAN BE MERGED (same procedure, name variations):
+- Same algorithm with different word order: "X Design" = "Design X"
+- Same algorithm in different languages: English name = translated name
+- Same algorithm with abbreviation: Full name = common abbreviation
+
 EXERCISE TYPE CLASSIFICATION (Phase 9.1):
 - **procedural**: Exercise requires applying an algorithm/procedure to solve a problem
-  * Examples: "Design a Mealy machine", "Calculate determinant", "Solve differential equation"
+  * Pattern: "Design...", "Calculate...", "Solve...", "Convert...", "Implement..."
   * Has clear input → process → output structure
   * Focuses on HOW to solve (execution of steps)
 
 - **theory**: Exercise asks for definitions, explanations, or conceptual understanding
-  * Examples: "Define what is a vector space", "Explain the concept of eigenvalues"
-  * Asks "What is...", "Define...", "Explain...", "Describe..."
-  * No computational work required
+  * Pattern: "Define...", "What is...", "Explain...", "Describe..."
+  * Asks for understanding, not computation
+  * No procedural work required
   * NOTE: Even ONE theory keyword (define, explain, what is, etc.) is sufficient to classify as theory
 
 - **proof**: Exercise requires proving a theorem, property, or statement
@@ -363,9 +419,9 @@ EXERCISE TYPE CLASSIFICATION (Phase 9.1):
   * Requires logical reasoning and mathematical proof structure
   * May ask to prove theorems, properties, or general statements
 
-- **hybrid**: Exercise combines multiple types (e.g., prove a property AND apply it to compute)
+- **hybrid**: Exercise combines multiple types (e.g., prove something AND apply it to compute)
   * Has both procedural and theory/proof components
-  * Example: "Prove the theorem and then use it to compute..."
+  * Pattern: "Prove... and then use it to..."
 
 PROOF KEYWORD DETECTION:
 - Scan the exercise text for proof keywords in BOTH Italian and English
@@ -380,63 +436,60 @@ NOTE: Presence of even ONE theory keyword from any category below is sufficient 
 **definition**: Asks for a formal definition of a concept, term, or object
   * Keywords (IT): "definisci", "definizione", "cos'è", "cosa si intende per"
   * Keywords (EN): "define", "definition", "what is", "what does ... mean"
-  * Example: "Dare la definizione di autovalore e autovettore"
-  * Set concept_id to normalized name (e.g., "autovalore_autovettore")
+  * Pattern: "Give the definition of X"
+  * Set concept_id to normalized name of the concept
 
 **theorem**: Asks to state, explain, or apply a specific theorem
   * Keywords (IT): "enunciare", "teorema", "enunciato"
   * Keywords (EN): "state the theorem", "theorem", "proposition"
-  * Example: "Enunciare il teorema spettrale"
+  * Pattern: "State theorem X", "Explain theorem Y"
   * Set theorem_name to specific theorem name
-  * Set concept_id to theorem identifier (e.g., "teorema_spettrale")
+  * Set concept_id to theorem identifier
 
 **axiom**: Asks about axioms, postulates, or fundamental properties
   * Keywords (IT): "assioma", "assiomi", "proprietà fondamentale", "postulato"
   * Keywords (EN): "axiom", "axioms", "postulate", "fundamental property"
-  * Example: "Elencare gli assiomi di uno spazio vettoriale"
-  * Set concept_id to axiom system (e.g., "assiomi_spazio_vettoriale")
+  * Pattern: "List the axioms of X"
+  * Set concept_id to axiom system
 
 **property**: Asks about properties, characteristics, or conditions
   * Keywords (IT): "proprietà", "caratteristica", "condizione"
   * Keywords (EN): "property", "characteristic", "condition"
-  * Example: "Quali proprietà ha la mutua esclusione?"
+  * Pattern: "What properties does X have?"
   * Set concept_id to property being discussed
 
 **explanation**: Asks to explain HOW or WHY something works
   * Keywords (IT): "spiega", "spiegare", "come funziona", "perché", "illustra"
   * Keywords (EN): "explain", "how does", "why", "illustrate", "describe how"
-  * Example: "Spiegare come funziona l'algoritmo del fornaio"
+  * Pattern: "Explain how X works", "Why does Y happen?"
   * Set concept_id to concept being explained
 
 **derivation**: Asks to derive or show how to obtain a result
   * Keywords (IT): "deriva", "derivare", "come si ottiene", "ricava"
   * Keywords (EN): "derive", "obtain", "show how to get"
-  * Example: "Derivare la formula del cambio di base"
+  * Pattern: "Derive formula X", "Show how to obtain Y"
   * Set concept_id to formula/result being derived
 
 **concept**: General conceptual question not fitting other categories
   * Use for understanding checks, conceptual comparisons, relationships
-  * Example: "Qual è la relazione tra autovalori e diagonalizzabilità?"
+  * Pattern: "What is the relationship between X and Y?"
   * Set concept_id to main concept discussed
 
 PREREQUISITE CONCEPT DETECTION:
 - Identify concepts that must be understood to answer the question
-- For "Dare la definizione di autovalore": prerequisites might be ["matrice", "vettore", "moltiplicazione_matriciale"]
-- For "Enunciare condizioni per diagonalizzabilità": prerequisites are ["autovalore", "molteplicita_algebrica", "molteplicita_geometrica"]
+- Set prerequisite_concepts to list of foundational concepts needed to understand this one
 - List 1-5 most important prerequisite concepts as normalized IDs
 
 CONCEPT ID NORMALIZATION:
 - Convert concept names to lowercase IDs with underscores
-- Examples: "Autovalori e Autovettori" → "autovalori_autovettori"
-- "Mutua Esclusione" → "mutua_esclusione"
-- "IEEE 754" → "ieee_754"
-- "Legge di Amdahl" → "legge_di_amdahl"
+- Pattern: "Concept Name" → "concept_name"
+- Remove articles, prepositions when possible
+- Keep acronyms/numbers as-is: "X 123" → "x_123"
 
 IMPORTANT:
 - theory_category is ONLY for theory/hybrid exercises (null for procedural)
 - For hybrid exercises, fill BOTH procedures array AND theory fields
 - If exercise asks definition AND computation, mark as hybrid with both
-- Use the course context to infer concepts (e.g., Computer Architecture → hardware concepts)
 
 BACKWARD COMPATIBILITY:
 - Even if exercise has only ONE procedure, still return it in "procedures" array
@@ -447,6 +500,74 @@ Respond ONLY with valid JSON, no other text.
 """
 
         return base_prompt
+
+    def _build_context_section(self, existing_context: Dict[str, Any]) -> str:
+        """Build the context section for the prompt with existing entities.
+
+        Args:
+            existing_context: Dict with topics, procedures, concepts lists
+
+        Returns:
+            Formatted context string for the prompt
+        """
+        sections = []
+
+        # Add existing topics
+        topics = existing_context.get("topics", [])
+        if topics:
+            topic_lines = []
+            for t in topics[:20]:  # Limit to avoid prompt bloat
+                name = t.get("name", t) if isinstance(t, dict) else t
+                count = t.get("procedure_count", 0) if isinstance(t, dict) else 0
+                if count:
+                    topic_lines.append(f"  - {name} ({count} procedures)")
+                else:
+                    topic_lines.append(f"  - {name}")
+            sections.append(f"""
+EXISTING TOPICS in this course (PREFER these if exercise fits):
+{chr(10).join(topic_lines)}""")
+
+        # Add existing procedures
+        procedures = existing_context.get("procedures", [])
+        if procedures:
+            proc_lines = []
+            for p in procedures[:30]:  # Limit to avoid prompt bloat
+                name = p.get("name", p) if isinstance(p, dict) else p
+                ptype = p.get("type", "unknown") if isinstance(p, dict) else "unknown"
+                proc_lines.append(f"  - {name} (type: {ptype})")
+            sections.append(f"""
+EXISTING PROCEDURES (PREFER these if exercise uses same method):
+{chr(10).join(proc_lines)}""")
+
+        # Add existing concepts
+        concepts = existing_context.get("concepts", [])
+        if concepts:
+            concept_lines = []
+            for c in concepts[:20]:  # Limit to avoid prompt bloat
+                name = c.get("name", c) if isinstance(c, dict) else c
+                ctype = c.get("type", "unknown") if isinstance(c, dict) else "unknown"
+                topic = c.get("topic", "") if isinstance(c, dict) else ""
+                if topic:
+                    concept_lines.append(f"  - {name} (type: {ctype}, topic: {topic})")
+                else:
+                    concept_lines.append(f"  - {name} (type: {ctype})")
+            sections.append(f"""
+EXISTING CONCEPTS (PREFER these for theory questions):
+{chr(10).join(concept_lines)}""")
+
+        if sections:
+            context_rules = """
+CONTEXT RULES (CRITICAL):
+1. PREFER existing topic if exercise fits semantically - do NOT create similar/duplicate topics
+2. PREFER existing procedure if solving same problem with same method
+3. PREFER existing concept if asking about same theoretical entity
+4. Create NEW topic only if exercise doesn't fit ANY existing topic
+5. Create NEW procedure only if method is genuinely different
+6. When in doubt, USE EXISTING names over creating new ones
+7. Topics should be CHAPTER-LEVEL (containing 3-10 related procedures), not individual techniques"""
+            return "".join(sections) + context_rules
+
+        return ""
 
     def _normalize_core_loop_id(self, core_loop_name: Optional[str]) -> Optional[str]:
         """Normalize core loop name to ID.

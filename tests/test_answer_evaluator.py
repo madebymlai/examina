@@ -1,8 +1,9 @@
 """
 Unit tests for AnswerEvaluator.
 
-Tests cover QUIZ mode (structured scoring) and LEARN mode (pedagogical feedback)
-without requiring actual LLM calls - uses mock LLM responses.
+Tests cover QUIZ mode (structured scoring), LEARN mode (pedagogical feedback),
+and RECALL mode (concept recall evaluation) without requiring actual LLM calls -
+uses mock LLM responses.
 """
 
 import sys
@@ -15,6 +16,7 @@ from core.answer_evaluator import (
     AnswerEvaluator,
     EvaluationMode,
     EvaluationResult,
+    RecallEvaluationResult,
 )
 
 
@@ -45,6 +47,7 @@ def test_evaluation_mode_values():
     """Test EvaluationMode enum values."""
     assert EvaluationMode.QUIZ.value == "quiz"
     assert EvaluationMode.LEARN.value == "learn"
+    assert EvaluationMode.RECALL.value == "recall"
     print("✓ test_evaluation_mode_values passed")
 
 
@@ -232,6 +235,216 @@ def test_evaluate_learn_llm_failure():
 
 
 # ============================================================================
+# Test RECALL Mode Evaluation
+# ============================================================================
+
+def test_evaluate_recall_valid_json():
+    """Test RECALL mode with valid JSON response."""
+    mock_llm = MockLLM(
+        response='''{
+            "recall_score": 0.85,
+            "correct_points": ["Mentioned key concept A", "Explained process B"],
+            "missed_points": ["Did not mention condition C"],
+            "misconceptions": [],
+            "feedback": "Good recall overall! You covered most key points."
+        }'''
+    )
+    evaluator = AnswerEvaluator(mock_llm)
+
+    result = evaluator.evaluate_recall(
+        concept_name="Pythagorean Theorem",
+        reference_content="a² + b² = c² for right triangles",
+        student_explanation="It's something about squares and triangles",
+    )
+
+    assert result.recall_score == 0.85
+    assert len(result.correct_points) == 2
+    assert len(result.missed_points) == 1
+    assert len(result.misconceptions) == 0
+    assert "Good recall" in result.feedback
+    assert result.success is True
+    print("✓ test_evaluate_recall_valid_json passed")
+
+
+def test_evaluate_recall_with_misconceptions():
+    """Test RECALL mode identifies misconceptions."""
+    mock_llm = MockLLM(
+        response='''{
+            "recall_score": 0.3,
+            "correct_points": ["Mentioned triangles"],
+            "missed_points": ["Did not explain the relationship", "Missing formula"],
+            "misconceptions": ["Said it applies to all triangles (only right triangles)"],
+            "feedback": "You have the basic idea but misunderstood when it applies."
+        }'''
+    )
+    evaluator = AnswerEvaluator(mock_llm)
+
+    result = evaluator.evaluate_recall(
+        concept_name="Pythagorean Theorem",
+        reference_content="a² + b² = c² for right triangles only",
+        student_explanation="a² + b² = c² works for all triangles",
+    )
+
+    assert result.recall_score == 0.3
+    assert len(result.misconceptions) == 1
+    assert "right triangles" in result.misconceptions[0]
+    assert result.success is True
+    print("✓ test_evaluate_recall_with_misconceptions passed")
+
+
+def test_evaluate_recall_json_with_extra_text():
+    """Test RECALL mode extracts JSON from response with extra text."""
+    mock_llm = MockLLM(
+        response='''Let me evaluate this:
+        {
+            "recall_score": 0.9,
+            "correct_points": ["All key points covered"],
+            "missed_points": [],
+            "misconceptions": [],
+            "feedback": "Excellent recall!"
+        }
+        That's my assessment.'''
+    )
+    evaluator = AnswerEvaluator(mock_llm)
+
+    result = evaluator.evaluate_recall(
+        concept_name="Test Concept",
+        reference_content="Reference content here",
+        student_explanation="Student explanation here",
+    )
+
+    assert result.recall_score == 0.9
+    assert result.success is True
+    print("✓ test_evaluate_recall_json_with_extra_text passed")
+
+
+def test_evaluate_recall_invalid_json_fallback():
+    """Test RECALL mode falls back to keyword matching on invalid JSON."""
+    mock_llm = MockLLM(
+        response="This is not valid JSON at all"
+    )
+    evaluator = AnswerEvaluator(mock_llm)
+
+    result = evaluator.evaluate_recall(
+        concept_name="Test Concept",
+        reference_content="reference content with keywords testing evaluation method",
+        student_explanation="student explanation with keywords testing",
+    )
+
+    # Fallback should calculate score based on keyword overlap
+    assert isinstance(result.recall_score, float)
+    assert 0.0 <= result.recall_score <= 1.0
+    assert result.success is False  # Fallback mode
+    assert result.correct_points == []  # Fallback doesn't populate these
+    assert result.missed_points == []
+    assert result.misconceptions == []
+    print("✓ test_evaluate_recall_invalid_json_fallback passed")
+
+
+def test_evaluate_recall_llm_failure():
+    """Test RECALL mode handles LLM failure gracefully."""
+    mock_llm = MockLLM(should_fail=True)
+    evaluator = AnswerEvaluator(mock_llm)
+
+    result = evaluator.evaluate_recall(
+        concept_name="Test Concept",
+        reference_content="This reference content has several important keywords and concepts",
+        student_explanation="Student mentions some keywords here",
+    )
+
+    # Should use fallback evaluation
+    assert isinstance(result.recall_score, float)
+    assert 0.0 <= result.recall_score <= 1.0
+    assert result.success is False
+    assert isinstance(result.feedback, str)
+    print("✓ test_evaluate_recall_llm_failure passed")
+
+
+def test_evaluate_recall_short_reference():
+    """Test RECALL mode with very short reference content."""
+    mock_llm = MockLLM(should_fail=True)
+    evaluator = AnswerEvaluator(mock_llm)
+
+    result = evaluator.evaluate_recall(
+        concept_name="Test",
+        reference_content="a b c",  # All words too short
+        student_explanation="Student answer",
+    )
+
+    # Fallback with short reference
+    assert result.recall_score == 0.5
+    assert result.success is False
+    assert "Unable to evaluate" in result.missed_points[0]
+    print("✓ test_evaluate_recall_short_reference passed")
+
+
+def test_evaluate_recall_high_score_fallback():
+    """Test fallback gives appropriate feedback for high recall score."""
+    mock_llm = MockLLM(should_fail=True)
+    evaluator = AnswerEvaluator(mock_llm)
+
+    result = evaluator.evaluate_recall(
+        concept_name="Test",
+        reference_content="important concept explained thoroughly with detail",
+        student_explanation="important concept explained thoroughly with detail and more",
+    )
+
+    # High keyword match should give good score and feedback
+    assert result.recall_score >= 0.7
+    assert "Good recall" in result.feedback
+    print("✓ test_evaluate_recall_high_score_fallback passed")
+
+
+def test_evaluate_recall_low_score_fallback():
+    """Test fallback gives appropriate feedback for low recall score."""
+    mock_llm = MockLLM(should_fail=True)
+    evaluator = AnswerEvaluator(mock_llm)
+
+    result = evaluator.evaluate_recall(
+        concept_name="Test",
+        reference_content="important concept explained thoroughly with detail",
+        student_explanation="something completely different",
+    )
+
+    # Low keyword match should give low score and feedback
+    assert result.recall_score < 0.4
+    assert "Limited recall" in result.feedback or "review" in result.feedback.lower()
+    print("✓ test_evaluate_recall_low_score_fallback passed")
+
+
+def test_recall_evaluation_result_defaults():
+    """Test RecallEvaluationResult default values."""
+    result = RecallEvaluationResult(
+        recall_score=0.8,
+        correct_points=["Point 1"],
+        missed_points=[],
+        misconceptions=[],
+        feedback="Good job!",
+    )
+
+    assert result.success is True  # Default value
+    assert result.recall_score == 0.8
+    print("✓ test_recall_evaluation_result_defaults passed")
+
+
+def test_recall_prompt_includes_all_fields():
+    """Test RECALL prompt includes all required information."""
+    mock_llm = MockLLM(response='{"recall_score": 0.5, "correct_points": [], "missed_points": [], "misconceptions": [], "feedback": "OK"}')
+    evaluator = AnswerEvaluator(mock_llm)
+
+    evaluator.evaluate_recall(
+        concept_name="Newton's Laws",
+        reference_content="First law: object at rest stays at rest",
+        student_explanation="Objects don't move unless pushed",
+    )
+
+    assert "Newton's Laws" in mock_llm.last_prompt
+    assert "First law" in mock_llm.last_prompt
+    assert "don't move unless pushed" in mock_llm.last_prompt
+    print("✓ test_recall_prompt_includes_all_fields passed")
+
+
+# ============================================================================
 # Test Fallback Evaluation
 # ============================================================================
 
@@ -377,6 +590,18 @@ def run_all_tests():
     test_evaluate_learn_basic()
     test_evaluate_learn_with_hints()
     test_evaluate_learn_llm_failure()
+
+    # RECALL mode tests
+    test_evaluate_recall_valid_json()
+    test_evaluate_recall_with_misconceptions()
+    test_evaluate_recall_json_with_extra_text()
+    test_evaluate_recall_invalid_json_fallback()
+    test_evaluate_recall_llm_failure()
+    test_evaluate_recall_short_reference()
+    test_evaluate_recall_high_score_fallback()
+    test_evaluate_recall_low_score_fallback()
+    test_recall_evaluation_result_defaults()
+    test_recall_prompt_includes_all_fields()
 
     # Fallback tests
     test_fallback_keyword_match_full()
