@@ -19,7 +19,7 @@ Examina analyzes your course materials (past exams, homework, problem sets, lect
 ```bash
 # Clone and setup
 git clone https://github.com/madebymlai/examina.git
-cd Examina
+cd examina
 python -m venv venv
 source venv/bin/activate  # Linux/Mac | Windows: venv\Scripts\activate
 pip install -r requirements.txt
