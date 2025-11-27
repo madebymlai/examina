@@ -34,6 +34,7 @@ USER_PROMPT_TEMPLATE = """Analyze this academic document and identify each disti
 For each exercise, provide:
 - exercise_number: The numeric identifier only (e.g., "1", "2", "3")
 - page: The page number where the exercise STARTS (look at "--- Page N ---" markers)
+- end_page: The page number where the exercise ENDS (same as page if single-page)
 - marker: The EXACT exercise marker text as it appears in the document (copy it verbatim)
 - line_hint: Approximate line number within the page (1 = top of page, estimate based on position)
 
@@ -42,6 +43,7 @@ IMPORTANT:
 - Include the full marker with its number (e.g., "Esercizio 3", "Exercise 3", "問題 3", "3.")
 - Do NOT translate or modify the marker - copy it exactly as written
 - line_hint helps disambiguate when the same marker appears multiple times on a page
+- end_page: Only include exercise/question content, NOT solution pages. If unsure, set end_page = page
 
 DOCUMENT:
 ---
@@ -51,8 +53,8 @@ DOCUMENT:
 Return a JSON object with this exact structure:
 {{
   "exercises": [
-    {{"exercise_number": "1", "page": 1, "marker": "<exact marker from document>", "line_hint": 5}},
-    {{"exercise_number": "2", "page": 3, "marker": "<exact marker from document>", "line_hint": 1}}
+    {{"exercise_number": "1", "page": 1, "end_page": 1, "marker": "<exact marker from document>", "line_hint": 5}},
+    {{"exercise_number": "2", "page": 3, "end_page": 4, "marker": "<exact marker from document>", "line_hint": 1}}
   ],
   "total_count": 2,
   "notes": "any observations about the document structure"
@@ -65,7 +67,8 @@ If no exercises are found, return: {{"exercises": [], "total_count": 0, "notes":
 class ExerciseBoundary:
     """Detected exercise boundary from LLM (page-aware)."""
     exercise_number: str
-    page: int
+    page: int                    # Start page
+    end_page: Optional[int]      # End page (None = same as start)
     marker: str
     line_hint: int = 1  # Approximate line number for disambiguation
     # Position fields populated by marker search
@@ -176,7 +179,10 @@ class LLMExerciseSplitter:
     ) -> List[ExerciseBoundary]:
         """Find actual positions of exercise markers in page text.
 
-        Uses line_hint to disambiguate when marker appears multiple times.
+        Uses multi-page search strategy:
+        1. Try LLM-specified page first
+        2. Search adjacent pages (off-by-one error)
+        3. Search ALL pages as last resort
 
         Args:
             boundaries: Exercise boundaries from LLM (positions not yet set)
@@ -190,44 +196,102 @@ class LLMExerciseSplitter:
         found_boundaries = []
 
         for boundary in boundaries:
-            page_idx = boundary.page - 1  # 0-indexed
-            if page_idx < 0 or page_idx >= len(pdf_content.pages):
-                logger.warning(f"Invalid page index {page_idx} for exercise {boundary.exercise_number}")
+            llm_page = boundary.page
+            found = False
+
+            # Strategy 1: Try LLM-specified page first
+            if 1 <= llm_page <= len(pdf_content.pages):
+                page = pdf_content.pages[llm_page - 1]
+                pos = self._search_marker_on_page(page.text, boundary)
+                if pos is not None:
+                    page_start = self._get_page_start_in_fulltext(llm_page, page_map, full_text)
+                    boundary.start_pos = page_start + pos
+                    found_boundaries.append(boundary)
+                    found = True
+
+            if found:
                 continue
 
-            page = pdf_content.pages[page_idx]
-            page_text = page.text
+            # Strategy 2: Search adjacent pages (off-by-one error)
+            for delta in [-1, 1, -2, 2]:
+                adj_page = llm_page + delta
+                if 1 <= adj_page <= len(pdf_content.pages):
+                    page = pdf_content.pages[adj_page - 1]
+                    pos = self._search_marker_on_page(page.text, boundary)
+                    if pos is not None:
+                        logger.info(
+                            f"Found '{boundary.marker}' on page {adj_page} "
+                            f"(LLM said {llm_page})"
+                        )
+                        boundary.page = adj_page  # Correct the page
+                        page_start = self._get_page_start_in_fulltext(adj_page, page_map, full_text)
+                        boundary.start_pos = page_start + pos
+                        found_boundaries.append(boundary)
+                        found = True
+                        break
 
-            # Find ALL occurrences of marker on page
-            positions = self._find_all_marker_positions(page_text, boundary.marker)
+            if found:
+                continue
 
-            if len(positions) == 0:
-                # Enhanced fuzzy search before giving up
-                pos = self._fuzzy_search_marker(page_text, boundary.marker, boundary.exercise_number)
+            # Strategy 3: Search ALL pages as last resort
+            for page_num in range(1, len(pdf_content.pages) + 1):
+                if page_num == llm_page or page_num in [llm_page + d for d in [-1, 1, -2, 2]]:
+                    continue  # Already searched
+
+                page = pdf_content.pages[page_num - 1]
+                pos = self._search_marker_on_page(page.text, boundary)
                 if pos is not None:
-                    positions = [pos]
+                    logger.warning(
+                        f"Found '{boundary.marker}' on page {page_num} via full scan "
+                        f"(LLM said {llm_page})"
+                    )
+                    boundary.page = page_num
+                    page_start = self._get_page_start_in_fulltext(page_num, page_map, full_text)
+                    boundary.start_pos = page_start + pos
+                    found_boundaries.append(boundary)
+                    found = True
+                    break
 
-            if len(positions) == 1:
-                pos = positions[0]
-            elif len(positions) > 1:
-                # Use line_hint to pick the right one
-                pos = self._select_by_line_hint(page_text, positions, boundary.line_hint)
-            else:
+            if not found:
                 logger.warning(
-                    f"Could not find marker '{boundary.marker}' on page {boundary.page} "
+                    f"Could not find marker '{boundary.marker}' on ANY page "
                     f"for exercise {boundary.exercise_number}"
                 )
-                continue
-
-            # Convert page-relative position to full-text position
-            page_start = self._get_page_start_in_fulltext(boundary.page, page_map, full_text)
-            boundary.start_pos = page_start + pos
-            found_boundaries.append(boundary)
 
         # Sort by start position
         found_boundaries.sort(key=lambda b: b.start_pos or 0)
 
         return found_boundaries
+
+    def _search_marker_on_page(
+        self,
+        page_text: str,
+        boundary: ExerciseBoundary
+    ) -> Optional[int]:
+        """Search for a marker on a single page.
+
+        Args:
+            page_text: Text of the page
+            boundary: Exercise boundary to search for
+
+        Returns:
+            Position if found, None otherwise
+        """
+        # Find ALL occurrences of marker on page
+        positions = self._find_all_marker_positions(page_text, boundary.marker)
+
+        if len(positions) == 0:
+            # Enhanced fuzzy search
+            pos = self._fuzzy_search_marker(page_text, boundary.marker, boundary.exercise_number)
+            if pos is not None:
+                return pos
+            return None
+
+        if len(positions) == 1:
+            return positions[0]
+
+        # Multiple matches - use line_hint to pick the right one
+        return self._select_by_line_hint(page_text, positions, boundary.line_hint)
 
     def _find_all_marker_positions(self, text: str, marker: str) -> List[int]:
         """Find all occurrences of a marker in text.
@@ -288,7 +352,7 @@ class LLMExerciseSplitter:
         return positions
 
     def _fuzzy_search_marker(self, text: str, marker: str, exercise_number: str) -> Optional[int]:
-        """Enhanced fuzzy search for marker with multiple fallback strategies.
+        """Enhanced fuzzy search for marker with 6 fallback strategies.
 
         Language-agnostic: Uses the LLM-provided marker directly, no hardcoded patterns.
 
@@ -303,14 +367,30 @@ class LLMExerciseSplitter:
         import re
         import unicodedata
 
-        # Strategy 1: Unicode normalization (handles accents, ligatures)
+        # Strategy 1: Unicode NFC normalization (handles accents, ligatures)
         text_nfc = unicodedata.normalize('NFC', text)
         marker_nfc = unicodedata.normalize('NFC', marker)
         pos = text_nfc.lower().find(marker_nfc.lower())
         if pos >= 0:
             return pos
 
-        # Strategy 2: Build dynamic regex from marker tokens (language-agnostic)
+        # Strategy 2: Unicode NFKC normalization (handles width variants)
+        text_nfkc = unicodedata.normalize('NFKC', text)
+        marker_nfkc = unicodedata.normalize('NFKC', marker)
+        pos = text_nfkc.lower().find(marker_nfkc.lower())
+        if pos >= 0:
+            return pos
+
+        # Strategy 3: Normalize whitespace (collapse multiple spaces/newlines)
+        text_ws = re.sub(r'\s+', ' ', text)
+        marker_ws = re.sub(r'\s+', ' ', marker)
+        pos = text_ws.lower().find(marker_ws.lower())
+        if pos >= 0:
+            # Map back to original position (find first word)
+            first_word = marker_ws.split()[0] if marker_ws.split() else marker_ws
+            return text.lower().find(first_word.lower())
+
+        # Strategy 4: Build dynamic regex from marker tokens (language-agnostic)
         # E.g., "Esercizio 3" → r'Esercizio\s+3', "問題 5" → r'問題\s+5'
         tokens = marker.split()
         if len(tokens) >= 2:
@@ -320,7 +400,7 @@ class LLMExerciseSplitter:
             if match:
                 return match.start()
 
-        # Strategy 3: Find by exercise number only (last resort)
+        # Strategy 5: Find by exercise number with any preceding word
         # Extract any number from marker and search for it at word boundary
         ex_num_match = re.search(r'\d+', marker)
         if ex_num_match:
@@ -332,7 +412,7 @@ class LLMExerciseSplitter:
             if match:
                 return match.start()
 
-        # Strategy 4: Try just the exercise number with various patterns
+        # Strategy 6: Try just the exercise number with various patterns
         if exercise_number:
             patterns = [
                 rf'(?:^|\n)\s*{re.escape(exercise_number)}[\.\)\]:]',  # "3." or "3)" at line start
@@ -488,9 +568,18 @@ class LLMExerciseSplitter:
                 logger.warning(f"Invalid page {page} for exercise {ex.get('exercise_number')}, skipping")
                 continue
 
+            # Get end_page, defaulting to start page if not provided
+            end_page = ex.get("end_page")
+            if end_page is not None:
+                end_page = int(end_page)
+                # Validate end_page
+                if end_page < page or end_page > max_page:
+                    end_page = page  # Fall back to single page
+
             boundary = ExerciseBoundary(
                 exercise_number=str(ex.get("exercise_number", "")),
                 page=page,
+                end_page=end_page,
                 marker=ex.get("marker", ""),
                 line_hint=ex.get("line_hint", 1),
             )
@@ -505,6 +594,78 @@ class LLMExerciseSplitter:
         boundaries.sort(key=lambda b: (b.page, b.line_hint))
 
         return boundaries
+
+    def _detect_orphan_pages(
+        self,
+        boundaries: List[ExerciseBoundary],
+        total_pages: int
+    ) -> List[int]:
+        """Detect pages not claimed by any exercise.
+
+        These are candidates for solution pages.
+
+        Args:
+            boundaries: Detected exercise boundaries with page ranges
+            total_pages: Total pages in PDF
+
+        Returns:
+            List of orphan page numbers
+        """
+        # Build set of all pages claimed by exercises
+        claimed_pages = set()
+        for boundary in boundaries:
+            start = boundary.page
+            end = boundary.end_page or boundary.page
+            for p in range(start, end + 1):
+                claimed_pages.add(p)
+
+        # All pages in PDF
+        all_pages = set(range(1, total_pages + 1))
+
+        # Orphan pages = not claimed by any exercise
+        orphan_pages = sorted(all_pages - claimed_pages)
+
+        logger.debug(f"Claimed pages: {sorted(claimed_pages)}")
+        logger.debug(f"Orphan pages: {orphan_pages}")
+
+        return orphan_pages
+
+    def _should_run_solution_matcher(
+        self,
+        boundaries: List[ExerciseBoundary],
+        orphan_pages: List[int]
+    ) -> bool:
+        """Determine if solution matcher should run.
+
+        Criteria:
+        1. Must have orphan pages
+        2. Orphan pages should follow exercise pages (structural pattern)
+
+        Args:
+            boundaries: Detected exercise boundaries
+            orphan_pages: Pages not claimed by any exercise
+
+        Returns:
+            True if solution matcher should run
+        """
+        if not orphan_pages:
+            return False
+
+        # Check if orphans follow exercises (solution pattern)
+        exercise_end_pages = {b.end_page or b.page for b in boundaries}
+
+        # At least one orphan should immediately follow an exercise
+        for orphan in orphan_pages:
+            if (orphan - 1) in exercise_end_pages:
+                return True
+
+        # Also check for appendix pattern: orphans at end after all exercises
+        if boundaries:
+            last_exercise_page = max(b.end_page or b.page for b in boundaries)
+            if min(orphan_pages) > last_exercise_page:
+                return True  # Appendix-style solutions
+
+        return False
 
     def _extract_exercises(
         self,

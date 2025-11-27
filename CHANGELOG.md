@@ -5,6 +5,15 @@ All notable changes and completed phases are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed - LLM Exercise Splitter Position Finding
+- Added `end_page` field to `ExerciseBoundary` for multi-page exercise support
+- Implemented multi-page search strategy (LLM page → adjacent pages → all pages)
+- Enhanced fuzzy search with 6 strategies (NFC, NFKC, whitespace, regex, number patterns)
+- Added orphan page detection for future solution matching
+- Added `_should_run_solution_matcher()` for auto-detecting Q+A format PDFs
+
 ## [0.15.0] - 2025-11-25
 
 ### Added - Web API Layer (Phase 2)
