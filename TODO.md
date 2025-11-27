@@ -11,6 +11,7 @@
 - **API timeouts**: Enhanced learn with prerequisites may timeout - use `--no-concepts` flag
 - **Topic splitting**: `--delete-old` may fail due to foreign key constraints if topic has references
 - **examina-core packaging**: `from config import Config` fails when installed as package
+- **LLMExerciseSplitter**: Strict text matching fails when PDF has artifacts (stray page numbers before markers). Missing exercises in some PDFs. Plan: `examina-cloud/.claude/plans/fix-llm-exercise-splitter.md`
 
 ### Low Priority
 - [ ] Concept normalization - Minor: some topics use underscores vs spaces (cosmetic)

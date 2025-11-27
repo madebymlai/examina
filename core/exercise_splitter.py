@@ -26,43 +26,30 @@ class Exercise:
 
 
 class ExerciseSplitter:
-    """Splits PDF content into individual exercises."""
+    """Language-agnostic exercise splitter using dynamic pattern detection."""
 
-    # Primary patterns - these are most likely to be exercises
-    PRIMARY_EXERCISE_PATTERNS = [
-        r'(?:^|\n)(?:Esercizio|Exercise|Problema|Problem)\s+(\d+(?:\.\d+)?)',  # Esercizio 1, Exercise 1.2
-        r'(?:^|\n)Domanda\s+(\d+)',  # Domanda 1 (Question 1)
-        r'(?:^|\n)Quesito\s+(\d+)',  # Quesito 1
-        r'(?:^|\n)(?:Ex|Es)\.?\s*(\d+(?:\.\d+)?)',  # Ex. 1, Es 1.2
+    # Structural patterns (language-agnostic fallback)
+    STRUCTURAL_PATTERNS = [
+        r'(?:^|\n)\s*(\d+)\.\s+',       # "1. " at line start
+        r'(?:^|\n)\s*(\d+)\)\s+',       # "1) " at line start
+        r'(?:^|\n)\s*\[(\d+)\]',        # "[1]" at line start
+        r'(?:^|\n)\s*([IVXLCDM]+)\.\s', # Roman numerals "I. ", "II. "
     ]
 
-    # Secondary patterns - only use if no primary patterns found
-    # These often match sub-questions or instructions
-    SECONDARY_PATTERNS = [
-        r'(?:^|\n)(\d+)\.\s+',  # 1. , 2. , etc.
-        r'(?:^|\n)(\d+)\)',  # 1), 2), etc.
-    ]
-
-    # Instruction blacklist - patterns that indicate instructions, not exercises
+    # Language-agnostic instruction patterns (structural, not language-specific)
     INSTRUCTION_PATTERNS = [
-        r'soluzioni?\s+E\s+procedimenti',  # "soluzioni E procedimenti"
-        r'non\s+si\s+può\s+usare',  # "NON si può usare"
-        r'nome\s*,\s*cognome\s+e\s+matricola',  # "nome, cognome e matricola"
-        r'fogli\s+forniti',  # "fogli forniti"
-        r'scritti\s+A\s+PENNA',  # "scritti A PENNA"
-        r'without\s+procedure',  # English instructions
-        r'is\s+not\s+allowed',  # English instructions
+        r'(?:^|\n)\s*[-•]\s+',          # Bullet points (likely instructions)
+        r':\s*$',                        # Lines ending with colon (likely headers)
     ]
 
     def __init__(self):
         """Initialize exercise splitter."""
-        self.primary_patterns = [re.compile(p, re.MULTILINE | re.IGNORECASE)
-                                for p in self.PRIMARY_EXERCISE_PATTERNS]
-        self.secondary_patterns = [re.compile(p, re.MULTILINE | re.IGNORECASE)
-                                  for p in self.SECONDARY_PATTERNS]
+        self.structural_patterns = [re.compile(p, re.MULTILINE | re.IGNORECASE)
+                                   for p in self.STRUCTURAL_PATTERNS]
         self.instruction_patterns = [re.compile(p, re.MULTILINE | re.IGNORECASE)
                                     for p in self.INSTRUCTION_PATTERNS]
         self.exercise_counter = 0
+        self._detected_pattern_cache: Dict[str, Optional[re.Pattern]] = {}
 
     def split_pdf_content(self, pdf_content: PDFContent, course_code: str) -> List[Exercise]:
         """Split PDF content into individual exercises.
@@ -152,14 +139,58 @@ class ExerciseSplitter:
 
         return exercises
 
-    def _find_exercise_markers(self, text: str) -> List[Tuple[int, str]]:
-        """Find all exercise markers in text.
+    def _detect_exercise_pattern(self, text: str) -> Optional[re.Pattern]:
+        """Detect the exercise pattern used in this document dynamically.
 
-        Strategy:
-        1. First try primary patterns (Esercizio, Exercise, etc.)
-        2. If primary patterns found, use only those (ignore sub-questions)
-        3. If no primary patterns, check for instruction blacklist
-        4. Only use secondary patterns if no primary and not instructions
+        Language-agnostic: Analyzes text to find recurring exercise markers
+        instead of hardcoding patterns like "Esercizio", "Exercise", etc.
+
+        Args:
+            text: Text to analyze
+
+        Returns:
+            Compiled pattern if found, None otherwise
+        """
+        # Check cache first (use hash of first 1000 chars as key)
+        cache_key = str(hash(text[:1000]))
+        if cache_key in self._detected_pattern_cache:
+            return self._detected_pattern_cache[cache_key]
+
+        # Look for repeated pattern: <word> <number> appearing multiple times
+        # E.g., "Esercizio 1", "Esercizio 2" → pattern is "Esercizio"
+        # Supports any language including CJK characters
+        word_num_pattern = r'\b([A-Za-z\u00C0-\u024F\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF]+)\s+(\d+)\b'
+        matches = re.findall(word_num_pattern, text, re.IGNORECASE)
+
+        # Count which words appear with multiple different numbers
+        word_counts: Dict[str, set] = {}
+        for word, num in matches:
+            word_lower = word.lower()
+            if word_lower not in word_counts:
+                word_counts[word_lower] = set()
+            word_counts[word_lower].add(num)
+
+        # Find words that appear with 2+ different numbers (likely exercise markers)
+        exercise_words = [(w, len(nums)) for w, nums in word_counts.items() if len(nums) >= 2]
+
+        if exercise_words:
+            # Use the word that appears with most different numbers
+            exercise_words.sort(key=lambda x: x[1], reverse=True)
+            word = exercise_words[0][0]
+            pattern = re.compile(rf'(?:^|\n)\s*{re.escape(word)}\s+(\d+)', re.IGNORECASE | re.MULTILINE)
+            self._detected_pattern_cache[cache_key] = pattern
+            return pattern
+
+        self._detected_pattern_cache[cache_key] = None
+        return None
+
+    def _find_exercise_markers(self, text: str) -> List[Tuple[int, str]]:
+        """Find all exercise markers in text using dynamic detection.
+
+        Strategy (language-agnostic):
+        1. Dynamically detect the exercise marker pattern used in this document
+        2. If pattern found, use it to find all exercises
+        3. Fall back to structural patterns (1., 2., etc.) if no word pattern found
 
         Args:
             text: Text to search
@@ -169,43 +200,27 @@ class ExerciseSplitter:
         """
         markers = []
 
-        # Try primary patterns first
-        for pattern in self.primary_patterns:
-            for match in pattern.finditer(text):
+        # Step 1: Try dynamic pattern detection (language-agnostic)
+        detected_pattern = self._detect_exercise_pattern(text)
+        if detected_pattern:
+            for match in detected_pattern.finditer(text):
                 position = match.start()
                 ex_number = match.group(1) if match.groups() else None
                 markers.append((position, ex_number))
 
-        # If primary patterns found, use only those
+        # If dynamic patterns found exercises, use those
         if markers:
             markers = list(set(markers))
             markers.sort(key=lambda x: x[0])
             return markers
 
-        # Check if this looks like instructions
-        is_instructions = any(pattern.search(text) for pattern in self.instruction_patterns)
-        if is_instructions:
-            # Don't split instruction pages
-            return []
-
-        # Only use secondary patterns if no primary patterns and not instructions
-        # Also require reasonable spacing between markers to avoid over-splitting
-        for pattern in self.secondary_patterns:
+        # Step 2: Fall back to structural patterns (1., 2., etc.)
+        for pattern in self.structural_patterns:
             for match in pattern.finditer(text):
                 position = match.start()
                 ex_number = match.group(1) if match.groups() else None
 
-                # Get context around match to filter out false positives
-                context_start = max(0, position - 50)
-                context_end = min(len(text), position + 150)
-                context = text[context_start:context_end]
-
-                # Skip if this looks like an instruction
-                if any(p.search(context) for p in self.instruction_patterns):
-                    continue
-
                 # Skip very short fragments (likely list items, not exercises)
-                # Look ahead to next marker
                 next_marker_pos = len(text)
                 for other_match in pattern.finditer(text[position+1:]):
                     next_marker_pos = position + 1 + other_match.start()
@@ -226,29 +241,36 @@ class ExerciseSplitter:
     def _is_instruction_page(self, text: str) -> bool:
         """Check if a page contains only instructions (not exercises).
 
+        Language-agnostic: Uses structural patterns instead of language-specific text.
+
         Args:
             text: Page text
 
         Returns:
             True if this is an instruction-only page
         """
-        # Check for instruction-only patterns
-        instruction_indicators = [
-            r'NOME.*COGNOME.*MATRICOLA',  # Header with name fields
-            r'Si\s+ricorda\s+che',  # "Si ricorda che" (It is reminded that)
+        # Language-agnostic structural indicators of instruction pages
+        # These patterns work across languages
+        structural_indicators = [
+            r'(?:^|\n)\s*[-•]\s+.{10,}',  # Multiple bullet points
+            r':\s*\n',                     # Lines ending with colon then newline
+            r'\b\d{4}[-/]\d{2}[-/]\d{2}\b',  # Date patterns (exam dates)
         ]
 
-        # Count how many instruction patterns match
-        matches = sum(1 for pattern in self.instruction_patterns +
-                     [re.compile(p, re.IGNORECASE) for p in instruction_indicators]
-                     if pattern.search(text))
+        # Count structural instruction patterns
+        matches = sum(1 for pattern in [re.compile(p, re.MULTILINE) for p in structural_indicators]
+                     if len(pattern.findall(text)) >= 2)
 
-        # If page is mostly instructions and no exercise markers, it's an instruction page
-        if matches >= 3:  # At least 3 instruction patterns
+        # If page has many instruction-like structures and is short, likely instructions
+        if matches >= 2 and len(text.strip()) < 500:
             return True
 
-        # Also check if page is very short and contains instructions
-        if len(text.strip()) < 500 and matches >= 2:
+        # Check if there are NO exercise-like patterns (no repeated word+number)
+        # but there ARE multiple bullet points
+        detected_pattern = self._detect_exercise_pattern(text)
+        bullet_count = len(re.findall(r'(?:^|\n)\s*[-•]\s+', text, re.MULTILINE))
+
+        if detected_pattern is None and bullet_count >= 5:
             return True
 
         return False
