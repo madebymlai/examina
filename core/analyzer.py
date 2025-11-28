@@ -358,7 +358,6 @@ Respond in JSON format with:
   "is_valid_exercise": true/false,  // false if it's just exam instructions or headers
   "is_fragment": true/false,  // true if incomplete or part of larger exercise
   "should_merge_with_previous": true/false,  // true if continuation of previous
-  "topic": "SPECIFIC topic name",  // MUST be specific, NOT generic course name!
   "difficulty": "easy|medium|hard",
   "variations": ["variation1", ...],  // specific variants used
   "confidence": 0.0-1.0,  // your confidence in this analysis
@@ -615,6 +614,13 @@ VARIATION DETECTION in knowledge_items:
 - If a knowledge item is a specific case of a general concept, set parent_name and variation_parameter
 - Example: "eigenvalue_2x2" → parent_name="eigenvalue", variation_parameter="2x2 matrix"
 - If NOT a variation: parent_name=null, variation_parameter=null
+
+CONTEXT EXCLUSION (CRITICAL - avoid word problem scenarios!):
+- Extract ONLY course concepts, NOT scenario/context items from word problems
+- Ask: "Would this appear in the course textbook, or is it just the word problem setting?"
+- Real-world objects, application domains are usually CONTEXT, not course concepts
+- Test: "Is this something a student learns/studies, or just where the problem takes place?"
+- Test: "Does this have a formal definition/procedure/theorem in the course, or is it just scenery?"
 
 BACKWARD COMPATIBILITY:
 - Even if exercise has only ONE procedure, still return it in "procedures" array
