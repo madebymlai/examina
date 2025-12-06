@@ -4,11 +4,19 @@ Splits PDF content into individual exercises based on patterns.
 """
 
 import re
+import json
 import hashlib
-from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
+import logging
+from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
+from dataclasses import dataclass, field
+from enum import Enum
 
 from core.pdf_processor import PDFContent, PDFPage
+
+if TYPE_CHECKING:
+    from models.llm_manager import LLMManager
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -104,6 +112,494 @@ class Exercise:
         return preview if preview else f"#{self.exercise_number or '?'}"
 
 
+class MarkerType(Enum):
+    """Type of exercise marker."""
+    PARENT = "parent"  # Main exercise marker (e.g., "Exercise 1")
+    SUB = "sub"        # Sub-question marker (e.g., "1.", "a)")
+
+
+@dataclass
+class Marker:
+    """A detected exercise marker in the document."""
+    marker_type: MarkerType
+    marker_text: str       # The actual marker text (e.g., "Exercise 1", "a)")
+    number: str            # Extracted number/letter ("1", "a", etc.)
+    start_position: int    # Character position where marker starts
+    question_start: int    # Character position where question text begins
+
+
+@dataclass
+class MarkerPattern:
+    """Pattern for exercise markers detected by LLM."""
+    keyword: str              # e.g., "Esercizio", "Exercise", "Problem"
+    has_sub_markers: bool     # Whether document has sub-questions
+    sub_format: Optional[str] # e.g., "numbered" (1., 2.) or "lettered" (a), b))
+
+
+@dataclass
+class ExerciseNode:
+    """Hierarchical exercise structure for building parent-child relationships."""
+    marker: Marker
+    context: str              # Setup text (for parents)
+    question_text: str        # The actual question
+    children: List["ExerciseNode"] = field(default_factory=list)
+    parent: Optional["ExerciseNode"] = None
+
+
+@dataclass
+class DetectionResult:
+    """Result from LLM exercise detection."""
+    pattern: Optional[MarkerPattern] = None  # Pattern-based detection
+    explicit_markers: Optional[List[str]] = None  # Explicit marker texts
+
+
+def _detect_pattern_with_llm(
+    text_sample: str,
+    llm_manager: "LLMManager",
+) -> Optional[DetectionResult]:
+    """Use LLM to detect exercise markers in document.
+
+    Two modes:
+    1. Pattern detection: LLM identifies a keyword pattern (e.g., "Esercizio")
+    2. Explicit markers: LLM lists the first few words of each exercise
+
+    Args:
+        text_sample: First ~10k chars of document
+        llm_manager: LLM manager for inference
+
+    Returns:
+        DetectionResult with either pattern or explicit markers, None if detection fails
+    """
+    prompt = """Analyze this exam/exercise document and identify the exercises.
+
+TEXT SAMPLE:
+---
+{text}
+---
+
+Two approaches:
+
+APPROACH 1 - If exercises use a consistent keyword pattern (e.g., "Esercizio 1", "Exercise 2", "Problem 3"):
+Return the keyword and sub-question format.
+
+APPROACH 2 - If no consistent keyword pattern exists:
+Return the first 3-5 words of each exercise as explicit markers.
+
+Return ONLY valid JSON in ONE of these formats:
+
+Format 1 (pattern-based):
+{{"mode": "pattern", "keyword": "the keyword", "has_sub_markers": true/false, "sub_format": "lettered" or "numbered" or null}}
+
+Format 2 (explicit markers):
+{{"mode": "explicit", "markers": ["First few words of exercise 1", "First few words of exercise 2", ...]}}
+
+Example Format 1: {{"mode": "pattern", "keyword": "Esercizio", "has_sub_markers": true, "sub_format": "lettered"}}
+Example Format 2: {{"mode": "explicit", "markers": ["Consider the following", "Given a graph G", "Prove that"]}}"""
+
+    try:
+        response = llm_manager.generate(
+            prompt.format(text=text_sample[:10000]),
+            temperature=0.0,
+        )
+
+        # Parse JSON response
+        # Handle potential markdown code blocks
+        response = response.strip()
+        if response.startswith("```"):
+            response = response.split("```")[1]
+            if response.startswith("json"):
+                response = response[4:]
+        response = response.strip()
+
+        data = json.loads(response)
+
+        mode = data.get("mode", "pattern")
+
+        if mode == "explicit":
+            markers = data.get("markers", [])
+            if markers:
+                return DetectionResult(explicit_markers=markers)
+            return None
+
+        # Pattern mode
+        keyword = data.get("keyword")
+        if not keyword:
+            return None
+
+        return DetectionResult(
+            pattern=MarkerPattern(
+                keyword=keyword,
+                has_sub_markers=data.get("has_sub_markers", False),
+                sub_format=data.get("sub_format"),
+            )
+        )
+
+    except (json.JSONDecodeError, KeyError, AttributeError) as e:
+        logger.warning(f"Failed to parse LLM pattern detection response: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"LLM pattern detection failed: {e}")
+        return None
+
+
+def _find_explicit_markers(
+    full_text: str,
+    marker_texts: List[str],
+) -> List[Marker]:
+    """Find markers in document using explicit marker texts from LLM.
+
+    Args:
+        full_text: Complete document text
+        marker_texts: List of marker texts to find (first few words of each exercise)
+
+    Returns:
+        List of Marker objects sorted by position
+    """
+    markers: List[Marker] = []
+
+    for i, marker_text in enumerate(marker_texts):
+        pos = _fuzzy_find(full_text, marker_text)
+        if pos >= 0:
+            markers.append(Marker(
+                marker_type=MarkerType.PARENT,
+                marker_text=marker_text,
+                number=str(i + 1),
+                start_position=pos,
+                question_start=pos,  # For explicit markers, question starts at marker
+            ))
+        else:
+            logger.warning(f"Explicit marker not found: '{marker_text}'")
+
+    # Sort by position and deduplicate (in case of overlapping matches)
+    markers.sort(key=lambda m: m.start_position)
+
+    # Remove duplicates (same position)
+    seen_positions = set()
+    unique_markers = []
+    for m in markers:
+        if m.start_position not in seen_positions:
+            seen_positions.add(m.start_position)
+            unique_markers.append(m)
+
+    return unique_markers
+
+
+def _fuzzy_find(text: str, search_term: str, start_from: int = 0) -> int:
+    """Find a term in text with tolerance for OCR errors.
+
+    Handles common OCR issues:
+    - Case differences
+    - Extra/missing spaces
+    - Common character substitutions (l/1, O/0)
+
+    Args:
+        text: Document text to search
+        search_term: Term to find
+        start_from: Position to start searching from
+
+    Returns:
+        Position of match, or -1 if not found
+    """
+    # First try exact match
+    pos = text.find(search_term, start_from)
+    if pos >= 0:
+        return pos
+
+    # Try case-insensitive
+    text_lower = text.lower()
+    search_lower = search_term.lower()
+    pos = text_lower.find(search_lower, start_from)
+    if pos >= 0:
+        return pos
+
+    # Try with normalized whitespace
+    search_normalized = re.sub(r'\s+', r'\\s+', re.escape(search_term))
+    pattern = re.compile(search_normalized, re.IGNORECASE)
+    match = pattern.search(text, start_from)
+    if match:
+        return match.start()
+
+    return -1
+
+
+def _find_all_markers(
+    full_text: str,
+    pattern: MarkerPattern,
+) -> List[Marker]:
+    """Find all exercise markers in document using detected pattern.
+
+    Args:
+        full_text: Complete document text
+        pattern: Detected marker pattern from LLM
+
+    Returns:
+        List of Marker objects sorted by position
+    """
+    markers: List[Marker] = []
+
+    # Build regex for parent markers: keyword + number
+    keyword_escaped = re.escape(pattern.keyword)
+    parent_regex = re.compile(
+        rf'(?:^|\n)\s*({keyword_escaped})\s+(\d+)',
+        re.IGNORECASE | re.MULTILINE
+    )
+
+    # Find all parent markers
+    for match in parent_regex.finditer(full_text):
+        marker_text = match.group(0).strip()
+        number = match.group(2)
+        start_pos = match.start()
+        # Question starts after the marker
+        question_start = match.end()
+
+        markers.append(Marker(
+            marker_type=MarkerType.PARENT,
+            marker_text=marker_text,
+            number=number,
+            start_position=start_pos,
+            question_start=question_start,
+        ))
+
+    # Find sub-markers if present
+    if pattern.has_sub_markers and pattern.sub_format:
+        if pattern.sub_format == "lettered":
+            # a), b), c) or a., b., c.
+            sub_regex = re.compile(
+                r'(?:^|\n)\s*([a-z])\s*[)\.]',
+                re.MULTILINE
+            )
+        else:  # numbered: 1., 2., 3. or 1), 2), 3)
+            sub_regex = re.compile(
+                r'(?:^|\n)\s*(\d+)\s*[)\.](?!\d)',  # (?!\d) to avoid matching "1.5"
+                re.MULTILINE
+            )
+
+        for match in sub_regex.finditer(full_text):
+            marker_text = match.group(0).strip()
+            number = match.group(1)
+            start_pos = match.start()
+            question_start = match.end()
+
+            markers.append(Marker(
+                marker_type=MarkerType.SUB,
+                marker_text=marker_text,
+                number=number,
+                start_position=start_pos,
+                question_start=question_start,
+            ))
+
+    # Sort by position
+    markers.sort(key=lambda m: m.start_position)
+
+    return markers
+
+
+def _build_hierarchy(markers: List[Marker], full_text: str) -> List[ExerciseNode]:
+    """Build hierarchical exercise structure from markers.
+
+    Args:
+        markers: List of detected markers (sorted by position)
+        full_text: Complete document text
+
+    Returns:
+        List of root ExerciseNode objects (parent exercises)
+    """
+    if not markers:
+        return []
+
+    roots: List[ExerciseNode] = []
+    current_parent: Optional[ExerciseNode] = None
+
+    for i, marker in enumerate(markers):
+        # Find end position (next marker or end of text)
+        if i + 1 < len(markers):
+            end_pos = markers[i + 1].start_position
+        else:
+            end_pos = len(full_text)
+
+        # Extract text for this marker
+        text_content = full_text[marker.question_start:end_pos].strip()
+
+        node = ExerciseNode(
+            marker=marker,
+            context="",  # Will be set for children
+            question_text=text_content,
+        )
+
+        if marker.marker_type == MarkerType.PARENT:
+            # This is a parent exercise
+            roots.append(node)
+            current_parent = node
+        else:
+            # This is a sub-question
+            if current_parent is not None:
+                node.parent = current_parent
+                # Context is the parent's intro text (before first sub)
+                if not current_parent.children:
+                    # First child - parent's question_text is the context
+                    node.context = current_parent.question_text
+                else:
+                    # Use same context as siblings
+                    node.context = current_parent.children[0].context
+                current_parent.children.append(node)
+            else:
+                # Orphan sub-question (no parent found) - treat as root
+                roots.append(node)
+
+    return roots
+
+
+def _expand_exercises(
+    hierarchy: List[ExerciseNode],
+    source_pdf: str,
+    course_code: str,
+    page_lookup: Dict[int, int],  # char_position -> page_number
+) -> List[Exercise]:
+    """Expand hierarchical structure to flat list with context.
+
+    Args:
+        hierarchy: List of root ExerciseNode objects
+        source_pdf: Source PDF filename
+        course_code: Course code for ID generation
+        page_lookup: Mapping of character positions to page numbers
+
+    Returns:
+        List of Exercise objects ready for analysis
+    """
+    exercises: List[Exercise] = []
+    counter = 0
+
+    def get_page_number(char_pos: int) -> int:
+        """Find page number for a character position."""
+        # Find the largest position that's <= char_pos
+        page = 1
+        for pos, pg in sorted(page_lookup.items()):
+            if pos <= char_pos:
+                page = pg
+            else:
+                break
+        return page
+
+    for parent in hierarchy:
+        counter += 1
+        parent_num = parent.marker.number
+
+        if parent.children:
+            # Parent has sub-questions - emit each sub with context
+            for child in parent.children:
+                counter += 1
+                # Prepend context to make sub-question standalone
+                full_text = f"{child.context}\n\n{child.question_text}".strip()
+
+                page_num = get_page_number(child.marker.start_position)
+                exercise_id = _generate_exercise_id(
+                    course_code, source_pdf, page_num, counter
+                )
+
+                exercises.append(Exercise(
+                    id=exercise_id,
+                    text=full_text,
+                    page_number=page_num,
+                    exercise_number=f"{parent_num}{child.marker.number}",
+                    has_images=False,  # Will be enriched later
+                    image_data=[],
+                    has_latex=False,
+                    latex_content=None,
+                    source_pdf=source_pdf,
+                    parent_exercise_number=parent_num,
+                    sub_question_marker=child.marker.number,
+                    is_sub_question=True,
+                ))
+        else:
+            # Parent has no sub-questions - emit as single exercise
+            page_num = get_page_number(parent.marker.start_position)
+            exercise_id = _generate_exercise_id(
+                course_code, source_pdf, page_num, counter
+            )
+
+            exercises.append(Exercise(
+                id=exercise_id,
+                text=parent.question_text,
+                page_number=page_num,
+                exercise_number=parent_num,
+                has_images=False,
+                image_data=[],
+                has_latex=False,
+                latex_content=None,
+                source_pdf=source_pdf,
+            ))
+
+    return exercises
+
+
+def _generate_exercise_id(
+    course_code: str,
+    source_pdf: str,
+    page_number: int,
+    counter: int,
+) -> str:
+    """Generate a unique exercise ID.
+
+    Args:
+        course_code: Course code
+        source_pdf: Source PDF filename
+        page_number: Page number
+        counter: Exercise counter
+
+    Returns:
+        Unique exercise ID
+    """
+    components = f"{course_code}_{source_pdf}_{page_number}_{counter}"
+    hash_obj = hashlib.md5(components.encode())
+    short_hash = hash_obj.hexdigest()[:12]
+    course_abbrev = course_code.lower().replace('b', '').replace('0', '')[:6]
+    return f"{course_abbrev}_{counter:04d}_{short_hash}"
+
+
+def _split_unstructured(
+    pdf_content: "PDFContent",
+    course_code: str,
+) -> List[Exercise]:
+    """Fallback: split document by pages when no markers found.
+
+    Args:
+        pdf_content: PDF content
+        course_code: Course code
+
+    Returns:
+        List of exercises (one per page with substantial content)
+    """
+    exercises: List[Exercise] = []
+    counter = 0
+
+    for page in pdf_content.pages:
+        text = page.text.strip()
+        if len(text) < 50:
+            continue  # Skip empty/header pages
+
+        counter += 1
+        exercise_id = _generate_exercise_id(
+            course_code,
+            pdf_content.file_path.name,
+            page.page_number,
+            counter,
+        )
+
+        exercises.append(Exercise(
+            id=exercise_id,
+            text=text,
+            page_number=page.page_number,
+            exercise_number=str(counter),
+            has_images=len(page.images) > 0,
+            image_data=page.images if page.images else [],
+            has_latex=page.has_latex,
+            latex_content=page.latex_content,
+            source_pdf=pdf_content.file_path.name,
+        ))
+
+    return exercises
+
+
 class ExerciseSplitter:
     """Language-agnostic exercise splitter using dynamic pattern detection."""
 
@@ -156,6 +652,132 @@ class ExerciseSplitter:
 
         # Clean up
         self._document_pattern = None
+
+        return exercises
+
+    def split_pdf_smart(
+        self,
+        pdf_content: PDFContent,
+        course_code: str,
+        llm_manager: "LLMManager",
+    ) -> List[Exercise]:
+        """Split PDF using LLM-based pattern detection with sub-question context.
+
+        This method uses LLM to detect the exercise marker pattern, then:
+        1. Finds all markers in the full document
+        2. Builds a hierarchical structure (parent → children)
+        3. Expands to flat list with context prepended to sub-questions
+
+        Args:
+            pdf_content: Extracted PDF content
+            course_code: Course code for ID generation
+            llm_manager: LLM manager for pattern detection
+
+        Returns:
+            List of extracted exercises with context
+        """
+        # Step 1: Concatenate all page text with position tracking
+        full_text = ""
+        page_lookup: Dict[int, int] = {}  # char_position -> page_number
+
+        for page in pdf_content.pages:
+            page_lookup[len(full_text)] = page.page_number
+            full_text += page.text + "\n"
+
+        if not full_text.strip():
+            return []
+
+        # Step 2: Detect pattern/markers with LLM
+        logger.info("Detecting exercise pattern with LLM...")
+        detection = _detect_pattern_with_llm(full_text[:10000], llm_manager)
+
+        if not detection:
+            # No detection - try regex fallback, then page-based
+            logger.info("No LLM detection, trying regex fallback...")
+            regex_pattern = self._detect_exercise_pattern(full_text)
+
+            if regex_pattern:
+                # Use the old page-based method with detected pattern
+                self._document_pattern = regex_pattern
+                exercises = []
+                for page in pdf_content.pages:
+                    page_exercises = self._split_page(
+                        page, pdf_content.file_path.name, course_code
+                    )
+                    exercises.extend(page_exercises)
+                self._document_pattern = None
+                return exercises
+
+            # No pattern at all - fall back to page-based splitting
+            logger.info("No pattern found, falling back to page-based splitting")
+            return _split_unstructured(pdf_content, course_code)
+
+        # Step 3: Find markers based on detection mode
+        markers: List[Marker] = []
+
+        if detection.explicit_markers:
+            # Mode 2: Explicit markers from LLM
+            logger.info(
+                f"Using explicit markers: {len(detection.explicit_markers)} markers"
+            )
+            markers = _find_explicit_markers(full_text, detection.explicit_markers)
+        elif detection.pattern:
+            # Mode 1: Pattern-based detection
+            pattern = detection.pattern
+            logger.info(
+                f"Pattern detected: keyword='{pattern.keyword}', "
+                f"has_sub={pattern.has_sub_markers}, sub_format={pattern.sub_format}"
+            )
+            markers = _find_all_markers(full_text, pattern)
+
+        if not markers:
+            logger.warning("Pattern detected but no markers found, falling back")
+            return _split_unstructured(pdf_content, course_code)
+
+        logger.info(f"Found {len(markers)} markers")
+
+        # Step 4: Build hierarchy
+        hierarchy = _build_hierarchy(markers, full_text)
+        logger.info(f"Built hierarchy with {len(hierarchy)} root exercises")
+
+        # Step 5: Expand to flat list with context
+        exercises = _expand_exercises(
+            hierarchy,
+            pdf_content.file_path.name,
+            course_code,
+            page_lookup,
+        )
+
+        # Step 6: Enrich with image/latex data from pages
+        exercises = self._enrich_with_page_data(exercises, pdf_content)
+
+        logger.info(f"Smart split produced {len(exercises)} exercises")
+        return exercises
+
+    def _enrich_with_page_data(
+        self,
+        exercises: List[Exercise],
+        pdf_content: PDFContent,
+    ) -> List[Exercise]:
+        """Enrich exercises with image and latex data from their pages.
+
+        Args:
+            exercises: List of exercises (may be missing image/latex data)
+            pdf_content: Original PDF content with page data
+
+        Returns:
+            Exercises with image and latex data populated
+        """
+        # Build page lookup
+        page_map = {page.page_number: page for page in pdf_content.pages}
+
+        for exercise in exercises:
+            page = page_map.get(exercise.page_number)
+            if page:
+                exercise.has_images = len(page.images) > 0 if page.images else False
+                exercise.image_data = page.images if page.images else []
+                exercise.has_latex = page.has_latex
+                exercise.latex_content = page.latex_content
 
         return exercises
 
