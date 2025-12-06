@@ -142,6 +142,253 @@ SECTIONS_BY_APPROACH = {
     "analytical": ["overview", "problem_types", "approach", "worked_example", "scoring_tips"]
 }
 
+# Prompt version for cache invalidation - bump when prompts change
+SECTION_PROMPT_VERSION = 1
+
+# Section-by-section prompts for waterfall learn mode
+# Each section is generated independently with focused prompts
+SECTION_PROMPTS = {
+    "procedural": {
+        "overview": f"""You are the smartest student in the library, helping a friend before their exam.
+Section 1 of 5: OVERVIEW
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms** - what a student would highlight.
+
+Write 50-100 words covering:
+- What problem does this procedure solve?
+- When would you recognize to use it in an exam?
+
+Keep it conversational: "You know when you see X? That's when you use this."
+Do NOT include steps yet - just set up WHY this matters.""",
+
+        "when_to_use": f"""You are the smartest student in the library, helping a friend before their exam.
+Section 2 of 5: WHEN TO USE
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms**.
+
+Write 50-100 words covering:
+- Pattern recognition: what clues in exam questions signal this procedure?
+- What does the setup look like? What keywords appear?
+
+The student already read the Overview. Don't re-introduce - jump to specifics.
+"When you see X, Y, or Z in the problem, that's your cue to use this."
+""",
+
+        "steps": f"""You are the smartest student in the library, helping a friend before their exam.
+Section 3 of 5: STEPS
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms** per step.
+
+Write 200-400 words. For EACH step:
+1. **Step N: [Name]** - What to do (clear instruction)
+2. WHY it works (the reasoning, not just "because")
+3. How to verify you did it right
+
+The student knows WHEN to use this. Now teach HOW.
+Be thorough - this is the core learning. Take your time.
+Use proper LaTeX for all math expressions.""",
+
+        "worked_example": f"""You are the smartest student in the library, helping a friend before their exam.
+Section 4 of 5: WORKED EXAMPLE
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms**.
+
+Write 300-500 words walking through the exam exercise step by step.
+Show your work like you're solving it on the board:
+- Write out each calculation
+- Reference the step numbers as you go ("Applying Step 2...")
+- Point out where students often mess up
+
+The student knows the steps. Do NOT re-list them before starting.
+But DO reference step numbers as you work: "Now in Step 3, we..."
+
+This should feel like watching someone solve it, not reading a solution manual.""",
+
+        "watch_out": f"""You are the smartest student in the library, helping a friend before their exam.
+Section 5 of 5: WATCH OUT
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms**.
+
+Write 150-250 words covering 2-3 biggest mistakes students make:
+For each mistake:
+- The mistake itself (what goes wrong)
+- Why it happens (the trap)
+- How to avoid it (the fix)
+
+The student knows the steps. Reference specific step numbers when relevant.
+Be specific to THIS procedure, not generic exam advice."""
+    },
+
+    "conceptual": {
+        "overview": f"""You are the smartest student in the library, explaining a concept to a friend.
+Section 1 of 4: OVERVIEW
+
+{LATEX_INSTRUCTION}
+Bold **only 1-2 key terms**.
+
+Write 30-50 words - ONE sentence summary.
+"This is about..." - set up what they're about to learn.
+Keep it ultra-brief. The definition comes next.""",
+
+        "definition": f"""You are the smartest student in the library, explaining a concept to a friend.
+Section 2 of 4: DEFINITION
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms**.
+
+Write 150-250 words covering:
+- The formal definition (precise, like a textbook)
+- The intuition (plain language, like margin notes)
+- An analogy if it helps
+
+The student read the overview. Now give them the real content.
+Use proper LaTeX for mathematical definitions.""",
+
+        "exam_patterns": f"""You are the smartest student in the library, explaining a concept to a friend.
+Section 3 of 4: EXAM PATTERNS
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms**.
+
+Write 150-250 words covering:
+- How professors test this concept
+- Common question formats you'll see
+- What they're really asking for
+
+The student knows the definition. Don't redefine it.
+"Prof loves asking..." - share the insider knowledge.""",
+
+        "common_mistakes": f"""You are the smartest student in the library, explaining a concept to a friend.
+Section 4 of 4: COMMON MISTAKES
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms**.
+
+Write 150-250 words covering:
+- 2-3 mistakes students make with this concept
+- Why each mistake happens
+- How to avoid it
+
+The student knows the definition and exam patterns.
+"Don't fall for this..." - friendly warning about point-losing errors."""
+    },
+
+    "factual": {
+        "fact": f"""You are the smartest student in the library, sharing notes before an exam.
+Section 1 of 3: THE FACT
+
+{LATEX_INSTRUCTION}
+Bold **the key fact itself**.
+
+Write 20-50 words. State it clearly and memorably.
+Like a highlighted note in your notebook.
+Just the fact - context comes next.""",
+
+        "context": f"""You are the smartest student in the library, sharing notes before an exam.
+Section 2 of 3: CONTEXT
+
+{LATEX_INSTRUCTION}
+Bold **only 1-2 key terms**.
+
+Write 50-100 words covering:
+- When/why this fact matters
+- Where it appears in exams
+- What it connects to
+
+The student knows the fact. Now tell them why it's important.
+"This always shows up when..." - the insider tip.""",
+
+        "memory_aid": f"""You are the smartest student in the library, sharing notes before an exam.
+Section 3 of 3: MEMORY AID
+
+{LATEX_INSTRUCTION}
+
+Write 50-100 words with a mnemonic or memory trick.
+- An acronym, rhyme, or visual association
+- How YOU remember it
+
+The student knows the fact and context.
+"The way I remember it..." - share your trick."""
+    },
+
+    "analytical": {
+        "overview": f"""You are the smartest student in the library, showing a friend how to crack hard problems.
+Section 1 of 4: OVERVIEW
+
+{LATEX_INSTRUCTION}
+Bold **only 1-2 key terms**.
+
+Write 50-100 words covering:
+- What type of problem is this?
+- What makes it challenging?
+
+"These questions want you to think about..." - frame the challenge.
+Don't solve anything yet - just set up what they'll face.""",
+
+        "approach": f"""You are the smartest student in the library, showing a friend how to crack hard problems.
+Section 2 of 4: APPROACH
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms**.
+
+Write 150-250 words covering:
+- How to think about this type of problem
+- What framework or strategy to use
+- Key questions to ask yourself
+
+The student knows the problem type. Now teach the thinking.
+"The trick is to..." - share the strategic insight.""",
+
+        "worked_example": f"""You are the smartest student in the library, showing a friend how to crack hard problems.
+Section 3 of 4: WORKED EXAMPLE
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms**.
+
+Write 300-500 words walking through the exam exercise.
+Show the full solution with your reasoning visible:
+- Apply the approach from the previous section
+- Reference the strategy as you go ("Using the framework...")
+- Show how to structure a full-marks answer
+
+The student knows the approach. Do NOT re-explain it.
+But DO reference it: "Applying our strategy of..."
+
+This is the gold standard - show what excellence looks like.""",
+
+        "scoring_tips": f"""You are the smartest student in the library, showing a friend how to crack hard problems.
+Section 4 of 4: SCORING TIPS
+
+{LATEX_INSTRUCTION}
+Bold **only 2-3 key terms**.
+
+Write 100-200 words covering:
+- How to maximize your score
+- What graders look for
+- Partial credit strategies
+
+The student has seen the worked example.
+"To get all the points..." - exam hacks for the win."""
+    }
+}
+
+# Map which sections need context from previous sections
+SECTION_CONTEXT_DEPENDENCIES = {
+    "procedural": {
+        "worked_example": "steps",  # worked example needs steps content
+        "watch_out": "steps",       # watch out references steps
+    },
+    "analytical": {
+        "worked_example": "approach",  # worked example needs approach content
+    },
+    # conceptual and factual don't need context passing
+}
+
 
 def parse_markdown_sections(markdown: str, learning_approach: str) -> List[Dict[str, Any]]:
     """Parse LLM markdown output into sections array.
@@ -530,6 +777,206 @@ class Tutor:
             "has_parent_context": bool(parent_exercise_context),
             "error": False
         }
+
+    def learn_section(
+        self,
+        knowledge_item: Dict[str, Any],
+        section_name: str,
+        section_index: int,
+        exercises: List[Dict[str, Any]],
+        previous_section_content: Optional[str] = None,
+        notes: Optional[List[str]] = None,
+        parent_exercise_context: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Generate a single section for waterfall learn mode.
+
+        Each section is generated independently with a focused prompt.
+
+        Args:
+            knowledge_item: KnowledgeItem dict with id, name, knowledge_type, learning_approach, content
+            section_name: Name of section to generate (e.g., "overview", "steps", "worked_example")
+            section_index: Index of this section (0-based)
+            exercises: List of linked exercise dicts for examples
+            previous_section_content: Optional content from a previous section (for context dependencies)
+            notes: Optional list of user's note content strings (PRO users)
+            parent_exercise_context: Optional parent exercise text for sub-questions
+
+        Returns:
+            Dict with section content and metadata
+        """
+        import json
+
+        # Get learning_approach (default to conceptual)
+        learning_approach = knowledge_item.get('learning_approach', 'conceptual').lower()
+        if learning_approach not in SECTION_PROMPTS:
+            learning_approach = 'conceptual'
+
+        # Get section prompts for this approach
+        approach_prompts = SECTION_PROMPTS.get(learning_approach, {})
+
+        # Get the specific section prompt
+        section_prompt = approach_prompts.get(section_name)
+        if not section_prompt:
+            return {
+                "content": f"Unknown section: {section_name}",
+                "section_name": section_name,
+                "section_index": section_index,
+                "error": True
+            }
+
+        # Get total sections for this approach
+        sections_list = list(approach_prompts.keys())
+        total_sections = len(sections_list)
+
+        # Select example exercise for worked example section
+        example_exercise = None
+        if "example" in section_name.lower() and exercises:
+            example_exercise = self._select_example_exercise(exercises)
+
+        # Build the prompt
+        prompt = self._build_section_prompt(
+            knowledge_item=knowledge_item,
+            section_prompt=section_prompt,
+            section_name=section_name,
+            example_exercise=example_exercise,
+            previous_section_content=previous_section_content,
+            notes=notes,
+            parent_exercise_context=parent_exercise_context,
+        )
+
+        # Call LLM
+        response = self.llm.generate(
+            prompt=prompt,
+            model=self.llm.primary_model,
+            temperature=0.3,
+            max_tokens=1500  # Sufficient for individual sections
+        )
+
+        if not response.success:
+            return {
+                "content": f"Could not generate section: {response.error}",
+                "section_name": section_name,
+                "section_index": section_index,
+                "total_sections": total_sections,
+                "learning_approach": learning_approach,
+                "error": True
+            }
+
+        return {
+            "content": response.text,
+            "section_name": section_name,
+            "section_index": section_index,
+            "total_sections": total_sections,
+            "is_last": section_index == total_sections - 1,
+            "learning_approach": learning_approach,
+            "error": False
+        }
+
+    def _build_section_prompt(
+        self,
+        knowledge_item: Dict[str, Any],
+        section_prompt: str,
+        section_name: str,
+        example_exercise: Optional[Dict[str, Any]],
+        previous_section_content: Optional[str],
+        notes: Optional[List[str]],
+        parent_exercise_context: Optional[str],
+    ) -> str:
+        """Build LLM prompt for a single section."""
+        import json
+
+        # Build language instruction
+        if self.language and self.language.lower() != "en":
+            language_instruction = f"IMPORTANT: You MUST respond entirely in {self.language}. Do not respond in English.\n\n"
+        else:
+            language_instruction = "Respond in English.\n\n"
+
+        # Start with language instruction and section prompt
+        prompt_parts = [
+            language_instruction + section_prompt,
+            "",
+            f"Knowledge Item: {knowledge_item.get('name', 'Unknown')}",
+            f"Type: {knowledge_item.get('knowledge_type', 'unknown')}",
+        ]
+
+        # Add content if available
+        content = knowledge_item.get('content')
+        if content:
+            if isinstance(content, dict):
+                content_str = json.dumps(content, indent=2)
+            else:
+                content_str = str(content)
+            prompt_parts.append(f"Content: {content_str}")
+
+        # Add previous section content if this section depends on it
+        if previous_section_content:
+            prompt_parts.append("")
+            prompt_parts.append("CONTEXT FROM PREVIOUS SECTION:")
+            prompt_parts.append("The student has already read this content:")
+            prompt_parts.append("---")
+            prompt_parts.append(previous_section_content)
+            prompt_parts.append("---")
+            prompt_parts.append("Reference this when relevant (e.g., step numbers, key concepts).")
+
+        # Add example exercise for worked example sections
+        if example_exercise:
+            prompt_parts.append("")
+            prompt_parts.append("EXAM EXERCISE TO SOLVE:")
+            prompt_parts.append(f"Source: {example_exercise.get('source_pdf', 'Unknown')}")
+            prompt_parts.append(example_exercise.get('text', example_exercise.get('content', '')))
+
+            # Add solution if available (for reference)
+            solution = example_exercise.get('solution')
+            if solution:
+                prompt_parts.append("")
+                prompt_parts.append("Official solution (use as reference):")
+                prompt_parts.append(solution)
+
+        # Add parent exercise context for sub-questions
+        if parent_exercise_context:
+            prompt_parts.append("")
+            prompt_parts.append("This is a sub-question. Full exercise context:")
+            prompt_parts.append(parent_exercise_context)
+
+        # Add user's notes (PRO feature)
+        if notes:
+            prompt_parts.append("")
+            prompt_parts.append("Student's notes on this topic:")
+            for note in notes[:3]:
+                note_text = note[:1500] if len(note) > 1500 else note
+                prompt_parts.append(note_text)
+            prompt_parts.append("")
+            prompt_parts.append("Incorporate relevant parts if they help.")
+
+        return "\n".join(prompt_parts)
+
+    def get_sections_for_approach(self, learning_approach: str) -> List[str]:
+        """Get list of section names for a learning approach.
+
+        Args:
+            learning_approach: The learning approach (procedural, conceptual, factual, analytical)
+
+        Returns:
+            List of section names in order
+        """
+        approach = learning_approach.lower()
+        if approach not in SECTION_PROMPTS:
+            approach = 'conceptual'
+        return list(SECTION_PROMPTS[approach].keys())
+
+    def get_section_context_dependency(self, learning_approach: str, section_name: str) -> Optional[str]:
+        """Check if a section needs content from a previous section.
+
+        Args:
+            learning_approach: The learning approach
+            section_name: The section to check
+
+        Returns:
+            Name of section to get context from, or None
+        """
+        approach = learning_approach.lower()
+        dependencies = SECTION_CONTEXT_DEPENDENCIES.get(approach, {})
+        return dependencies.get(section_name)
 
     def _select_example_exercise(self, exercises: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Select best exercise for worked example.
