@@ -411,6 +411,10 @@ def _find_all_markers(
         ))
 
     # Find sub-markers if present
+    # IMPORTANT: Only look for sub-markers AFTER the first parent marker
+    # to avoid treating numbered instructions (page headers) as sub-questions
+    first_parent_pos = markers[0].start_position if markers else len(full_text)
+
     if pattern.has_sub_markers and pattern.sub_format:
         if pattern.sub_format == "lettered":
             sub_regex = re.compile(
@@ -425,6 +429,11 @@ def _find_all_markers(
 
         for match in sub_regex.finditer(full_text):
             start_pos = match.start()
+
+            # Skip sub-markers before the first exercise keyword
+            # (these are typically numbered instructions in page headers)
+            if start_pos < first_parent_pos:
+                continue
 
             # Skip sub-markers in solution sections
             if _is_in_solution_section(start_pos):
@@ -463,6 +472,8 @@ def _build_hierarchy(markers: List[Marker], full_text: str) -> List[ExerciseNode
 
     roots: List[ExerciseNode] = []
     current_parent: Optional[ExerciseNode] = None
+    highest_sub_value: int = 0  # Track highest sub-marker value (number or letter ord)
+    in_restart_sequence: bool = False  # Skip all subs after restart detected
 
     for i, marker in enumerate(markers):
         # Find end position (next marker or end of text)
@@ -484,9 +495,32 @@ def _build_hierarchy(markers: List[Marker], full_text: str) -> List[ExerciseNode
             # This is a parent exercise
             roots.append(node)
             current_parent = node
+            highest_sub_value = 0  # Reset for new parent
+            in_restart_sequence = False  # Reset restart flag
         else:
             # This is a sub-question
             if current_parent is not None:
+                # Skip sub-markers in restart sequence (e.g., page headers)
+                if in_restart_sequence:
+                    continue
+
+                # Detect restart: if sequence restarts (1 after 4, or 'a' after 'd')
+                sub_value = 0
+                is_start = False
+                try:
+                    sub_value = int(marker.number)
+                    is_start = (sub_value == 1)
+                except ValueError:
+                    # Lettered marker (a, b, c...)
+                    if len(marker.number) == 1 and marker.number.isalpha():
+                        sub_value = ord(marker.number.lower()) - ord('a') + 1
+                        is_start = (marker.number.lower() == 'a')
+
+                if is_start and highest_sub_value > 0:
+                    # Sequence restarted - skip this and all subsequent
+                    in_restart_sequence = True
+                    continue
+                highest_sub_value = max(highest_sub_value, sub_value)
                 node.parent = current_parent
                 # Context is the parent's intro text (before first sub)
                 if not current_parent.children:
