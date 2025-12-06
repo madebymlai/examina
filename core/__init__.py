@@ -17,6 +17,14 @@ from core.provider_router import ProviderRouter
 from core.task_types import TaskType
 from core.answer_evaluator import RecallEvaluationResult
 from core.note_splitter import NoteSplitter, NoteSection
+from core.review_engine import (
+    ReviewEngine,
+    GeneratedExercise,
+    ReviewEvaluation,
+    ExerciseExample,
+    score_to_quality,
+    calculate_mastery,
+)
 
 __all__ = [
     "ExerciseAnalyzer",
@@ -30,4 +38,11 @@ __all__ = [
     "RecallEvaluationResult",
     "NoteSplitter",
     "NoteSection",
+    # Review Mode v2
+    "ReviewEngine",
+    "GeneratedExercise",
+    "ReviewEvaluation",
+    "ExerciseExample",
+    "score_to_quality",
+    "calculate_mastery",
 ]
