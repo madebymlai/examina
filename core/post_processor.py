@@ -2,6 +2,7 @@
 Post-processor for knowledge item validation.
 
 Uses LLM to validate extracted items via coherence-based filtering.
+Also detects synonyms for deduplication.
 """
 import json
 import logging
@@ -10,6 +11,72 @@ from typing import Any
 from models.llm_manager import LLMManager
 
 logger = logging.getLogger(__name__)
+
+
+def detect_synonyms(
+    names: list[str],
+    llm: LLMManager,
+) -> list[list[str]]:
+    """
+    Use LLM to detect synonym groups among knowledge item names.
+
+    Returns list of groups, where each group contains synonymous names.
+    Example: [["Mealy machine", "Mealy automaton"], ["DFS", "depth-first search"]]
+
+    Args:
+        names: List of knowledge item names to check
+        llm: LLMManager instance
+
+    Returns:
+        List of synonym groups (each group has 2+ names that mean the same thing)
+    """
+    if len(names) < 2:
+        return []
+
+    # Dedupe names for the prompt
+    unique_names = list(set(names))
+    if len(unique_names) < 2:
+        return []
+
+    prompt = f"""Given these knowledge item names from a course, identify groups of SYNONYMS (different names for the SAME concept).
+
+Names:
+{chr(10).join(f"- {name}" for name in unique_names)}
+
+RULES:
+1. Only group items that mean EXACTLY the same thing (abbreviations, alternate spellings, full names)
+2. Different types/variants of the same category are NOT synonyms
+3. Parent-child relationships are NOT synonyms (a category is NOT a synonym of its member)
+4. Abbreviations and their expansions ARE synonyms (e.g., "X" and "X method" for the same thing)
+
+Return a JSON array of arrays, where each inner array contains synonymous names.
+Only include groups with 2+ names. Names not in any group are unique concepts.
+
+Return ONLY the JSON array, no explanation. Return [] if no synonyms found."""
+
+    try:
+        response = llm.generate(
+            prompt=prompt,
+            temperature=0.0,
+            json_mode=True,
+        )
+
+        if response and response.text:
+            groups = json.loads(response.text)
+            # Validate structure
+            if isinstance(groups, list) and all(isinstance(g, list) for g in groups):
+                # Filter to groups with 2+ items
+                valid_groups = [g for g in groups if len(g) >= 2]
+                if valid_groups:
+                    logger.info(f"Detected {len(valid_groups)} synonym groups: {valid_groups}")
+                return valid_groups
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse synonym detection response: {e}")
+    except Exception as e:
+        logger.warning(f"Synonym detection failed: {e}")
+
+    return []
 
 
 def filter_and_organize_knowledge(

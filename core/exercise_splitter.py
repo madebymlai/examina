@@ -31,7 +31,7 @@ class Exercise:
     has_latex: bool
     latex_content: Optional[str]
     source_pdf: str
-    # Solution fields (populated by SolutionMatcher if Q+A format detected)
+    # Solution fields (populated via LLM-provided solution_pattern)
     solution: Optional[str] = None
     solution_page: Optional[int] = None
     # Sub-question support (added for unified knowledge model)
