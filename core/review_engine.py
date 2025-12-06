@@ -198,9 +198,20 @@ REAL EXAM/PRACTICE EXAMPLES (study these carefully):
 {"ADDITIONAL CONTEXT:" + chr(10) + context_text if context_text else ""}
 {avoid_text}
 
+IGNORE ALL OF THE FOLLOWING IN EXAMPLES - these are NOT exercises:
+- Exam headers (NOME, COGNOME, MATRICOLA, student ID fields)
+- Exam instructions (rules about pens, calculators, paper)
+- Page numbers, dates, professor names
+- Any administrative text that isn't an actual question
+
+LOOK FOR THE ACTUAL EXERCISE which typically:
+- Asks to calculate, convert, explain, or analyze something
+- Contains mathematical notation, formulas, or specific values
+- Has a clear question or task to complete
+
 CRITICAL REQUIREMENTS:
 1. Generate in the SAME LANGUAGE as the examples above
-2. Your exercise MUST match the complexity and style of the examples
+2. Your exercise MUST match the complexity and style of ACTUAL exercises (not headers)
 3. Use DIFFERENT numbers, variables, or scenarios - never copy
 4. Include realistic edge cases or tricks that appear in real exams
 5. If examples use specific notation/formatting, match it exactly
@@ -208,6 +219,7 @@ CRITICAL REQUIREMENTS:
 7. Match the EXACT difficulty level - if examples are hard, yours must be hard
 
 DO NOT:
+- Copy exam headers, instructions, or administrative text
 - Generate trivial "textbook example" problems
 - Make it easier than the real examples
 - Use round/obvious numbers if examples don't
@@ -224,10 +236,14 @@ Return valid JSON:
 }}"""
 
         try:
-            response = self._llm.generate(prompt)
-            return self._parse_exercise_response(response, knowledge_item_name)
+            response = self._llm.generate(prompt, json_mode=True)
+            # Handle LLMResponse object or string
+            response_text = response.text if hasattr(response, 'text') else str(response)
+            return self._parse_exercise_response(response_text, knowledge_item_name)
         except Exception as e:
             # Fallback: create simple exercise
+            import logging
+            logging.getLogger(__name__).warning(f"Exercise generation failed: {e}")
             return GeneratedExercise(
                 exercise_text=f"Explain the key concepts of {knowledge_item_name}.",
                 expected_answer="A clear explanation of the main concepts.",
@@ -302,10 +318,14 @@ Return valid JSON:
 }}"""
 
         try:
-            response = self._llm.generate(prompt)
-            return self._parse_evaluation_response(response, expected_answer, student_answer)
-        except Exception:
+            response = self._llm.generate(prompt, json_mode=True)
+            # Handle LLMResponse object or string
+            response_text = response.text if hasattr(response, 'text') else str(response)
+            return self._parse_evaluation_response(response_text, expected_answer, student_answer)
+        except Exception as e:
             # Fallback evaluation
+            import logging
+            logging.getLogger(__name__).warning(f"Answer evaluation failed: {e}")
             return self._fallback_evaluation(expected_answer, student_answer)
 
     def _format_examples(self, examples: list[ExerciseExample]) -> str:
