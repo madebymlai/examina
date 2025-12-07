@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def detect_synonyms(
-    items: list[tuple[str, str]],
+    items: list[tuple[str, str]] | list[dict],
     llm: LLMManager,
 ) -> list[tuple[str, str, list[str]]]:
     """
@@ -23,7 +23,9 @@ def detect_synonyms(
     Only groups items of the SAME type together. Different types = different skills.
 
     Args:
-        items: List of (name, knowledge_type) tuples
+        items: Either:
+            - List of (name, knowledge_type) tuples (legacy format)
+            - List of dicts with keys: name, type, exercises (optional list of exercise snippets)
         llm: LLMManager instance
 
     Returns:
@@ -33,25 +35,86 @@ def detect_synonyms(
     if len(items) < 2:
         return []
 
+    # Normalize input format
+    # Support both (name, type) tuples and dict format with exercises
+    normalized_items: list[dict] = []
+    for item in items:
+        if isinstance(item, tuple):
+            normalized_items.append({"name": item[0], "type": item[1], "exercises": []})
+        elif isinstance(item, dict):
+            normalized_items.append({
+                "name": item.get("name", ""),
+                "type": item.get("type", "key_concept"),
+                "exercises": item.get("exercises", []),
+            })
+
     # Group by type - only same-type items can be synonyms
-    by_type: dict[str, list[str]] = {}
-    for name, item_type in items:
+    by_type: dict[str, list[dict]] = {}
+    for item in normalized_items:
+        item_type = item["type"]
         if item_type not in by_type:
             by_type[item_type] = []
-        by_type[item_type].append(name)
+        by_type[item_type].append(item)
 
     all_groups: list[tuple[str, str, list[str]]] = []
 
     # Run synonym detection per type
-    for item_type, names in by_type.items():
-        unique_names = list(set(names))
-        if len(unique_names) < 2:
+    for item_type, type_items in by_type.items():
+        # Dedupe by name, keeping first occurrence (preserves exercises)
+        seen_names: set[str] = set()
+        unique_items: list[dict] = []
+        for item in type_items:
+            if item["name"] not in seen_names:
+                seen_names.add(item["name"])
+                unique_items.append(item)
+
+        if len(unique_items) < 2:
             continue
 
-        prompt = f"""Identify knowledge item groups that should be MERGED into a single concept.
+        # Check if we have exercise context
+        has_exercises = any(item.get("exercises") for item in unique_items)
+
+        if has_exercises:
+            # Build detailed prompt with exercise context
+            items_text = []
+            for item in unique_items:
+                item_text = f"- {item['name']}"
+                if item.get("exercises"):
+                    # Show first 2 exercises, truncated to 100 chars each
+                    exercise_snippets = []
+                    for ex in item["exercises"][:2]:
+                        snippet = ex[:100] + "..." if len(ex) > 100 else ex
+                        exercise_snippets.append(f'    "{snippet}"')
+                    if exercise_snippets:
+                        item_text += "\n  Exercises:\n" + "\n".join(exercise_snippets)
+                items_text.append(item_text)
+
+            prompt = f"""Identify knowledge item groups that should be MERGED into a single concept.
+
+Items with exercise examples:
+{chr(10).join(items_text)}
+
+MERGE when items represent the SAME underlying skill or concept:
+- The exercises test the SAME technique or knowledge
+- A student who masters one item automatically masters the others
+- The difference is just naming/phrasing, not conceptual
+
+DO NOT MERGE when items are genuinely different:
+- Exercises test DIFFERENT techniques (e.g., FSM design vs Boolean minimization)
+- Require different knowledge or problem-solving approaches
+- Would be separate topics in a course
+
+Return JSON array of objects with:
+- "canonical": A clean, concise English name for this concept
+- "members": Array of input names that belong to this group
+
+Return [] if no groups found."""
+        else:
+            # Legacy prompt without exercise context
+            prompt = f"""Identify knowledge item groups that should be MERGED into a single concept.
 
 Names (snake_case - treat underscores as spaces):
-{chr(10).join(f"- {name}" for name in unique_names)}
+{chr(10).join(f"- {item['name']}" for item in unique_items)}
 
 MERGE when items represent the SAME underlying skill or concept:
 - A student who masters one item automatically masters the others
@@ -70,7 +133,7 @@ Return JSON array of objects with:
 Return [] if no groups found."""
 
         try:
-            logger.info(f"Detecting synonyms among {len(unique_names)} {item_type} items")
+            logger.info(f"Detecting synonyms among {len(unique_items)} {item_type} items (with_exercises={has_exercises})")
             response = llm.generate(
                 prompt=prompt,
                 temperature=0.0,
