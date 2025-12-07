@@ -14,87 +14,87 @@ logger = logging.getLogger(__name__)
 
 
 def detect_synonyms(
-    names: list[str],
+    items: list[tuple[str, str]],
     llm: LLMManager,
-) -> list[list[str]]:
+) -> list[tuple[str, str, list[str]]]:
     """
-    Use LLM to detect synonym groups among knowledge item names.
+    Use LLM to detect synonym groups among knowledge items.
 
-    Returns list of groups, where each group contains synonymous names.
-    Example: [["Mealy machine", "Mealy automaton"], ["DFS", "depth-first search"]]
+    Only groups items of the SAME type together. Different types = different skills.
 
     Args:
-        names: List of knowledge item names to check
+        items: List of (name, knowledge_type) tuples
         llm: LLMManager instance
 
     Returns:
-        List of synonym groups (each group has 2+ names that mean the same thing)
+        List of (canonical_name, type, member_names) tuples
+        Example: [("moore_machine_design", "procedure", ["macchina_di_moore", "moore_design"])]
     """
-    if len(names) < 2:
+    if len(items) < 2:
         return []
 
-    # Dedupe names for the prompt
-    unique_names = list(set(names))
-    if len(unique_names) < 2:
-        return []
+    # Group by type - only same-type items can be synonyms
+    by_type: dict[str, list[str]] = {}
+    for name, item_type in items:
+        if item_type not in by_type:
+            by_type[item_type] = []
+        by_type[item_type].append(name)
 
-    prompt = f"""Given these knowledge item names from a course, identify groups that should be MERGED into ONE concept.
+    all_groups: list[tuple[str, str, list[str]]] = []
 
-Names:
+    # Run synonym detection per type
+    for item_type, names in by_type.items():
+        unique_names = list(set(names))
+        if len(unique_names) < 2:
+            continue
+
+        prompt = f"""Identify knowledge item groups that should be MERGED into a single concept.
+
+Names (snake_case - treat underscores as spaces):
 {chr(10).join(f"- {name}" for name in unique_names)}
 
-MERGE AGGRESSIVELY using these rules:
+MERGE when items represent the SAME underlying skill or concept:
+- A student who masters one item automatically masters the others
+- A textbook would cover them in a single section, not separate chapters
+- The difference is just naming/phrasing, not conceptual
+- Items differ only by the specific instance used in a problem, not the underlying technique
 
-1. MERGE SAME SKILL WITH DIFFERENT INPUTS:
-   - Same technique/method applied to different input types, sizes, or parameters
-   - Pattern: "base_concept_X", "base_concept_Y", "base_concept_Z" → ONE "base_concept"
-   - The student learns ONE skill, then applies it to different cases
+DO NOT MERGE when items are genuinely different:
+- Require different knowledge or techniques
+- Would be separate topics in a course
 
-2. MERGE SAME DEFINITION WITH DIFFERENT SCOPES:
-   - Same definition applied to 2-variable, 3-variable, 4-variable cases → ONE definition
-   - Same theorem with different dimensions/parameters → ONE theorem
+Return JSON array of objects with:
+- "canonical": A clean, concise English name for this concept (CREATE the best name, don't just pick from list)
+- "members": Array of input names that belong to this group
 
-3. MERGE EQUIVALENT NAMES:
-   - Abbreviation = full name
-   - Alternate phrasings of the same concept
-   - Singular = plural ("X_condition" = "X_conditions")
-   - Different suffixes for same root ("X_formula" = "X_calculation")
+Return [] if no groups found."""
 
-4. DO NOT MERGE TRULY DIFFERENT CONCEPTS:
-   - Fundamentally different techniques (different algorithms, not same algorithm with different inputs)
-   - Related but conceptually distinct topics
+        try:
+            logger.info(f"Detecting synonyms among {len(unique_names)} {item_type} items")
+            response = llm.generate(
+                prompt=prompt,
+                temperature=0.0,
+                json_mode=True,
+            )
 
-KEY PRINCIPLE: Would a textbook have ONE section covering all these, or SEPARATE sections?
-- ONE section = merge (student learns one concept, applies to many cases)
-- SEPARATE sections = don't merge (fundamentally different concepts)
+            if response and response.text:
+                logger.debug(f"Synonym detection raw response: {response.text[:500]}")
+                groups = json.loads(response.text)
+                # Validate structure - expect list of {"canonical": str, "members": [str]}
+                if isinstance(groups, list):
+                    for g in groups:
+                        if isinstance(g, dict) and "canonical" in g and "members" in g:
+                            if isinstance(g["members"], list) and len(g["members"]) >= 1:
+                                all_groups.append((g["canonical"], item_type, g["members"]))
+                    if all_groups:
+                        logger.info(f"Detected {len(all_groups)} synonym groups for type {item_type}")
 
-Return JSON array of arrays. First item in each group is the CANONICAL (most abstract/general) name to keep.
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse synonym detection response: {e}")
+        except Exception as e:
+            logger.warning(f"Synonym detection failed for type {item_type}: {e}")
 
-Return ONLY the JSON array. Return [] if no groups found."""
-
-    try:
-        response = llm.generate(
-            prompt=prompt,
-            temperature=0.0,
-            json_mode=True,
-        )
-
-        if response and response.text:
-            groups = json.loads(response.text)
-            # Validate structure
-            if isinstance(groups, list) and all(isinstance(g, list) for g in groups):
-                # Filter to groups with 2+ items
-                valid_groups = [g for g in groups if len(g) >= 2]
-                if valid_groups:
-                    logger.info(f"Detected {len(valid_groups)} synonym groups: {valid_groups}")
-                return valid_groups
-
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse synonym detection response: {e}")
-    except Exception as e:
-        logger.warning(f"Synonym detection failed: {e}")
-
-    return []
+    return all_groups
 
 
 def filter_and_organize_knowledge(
