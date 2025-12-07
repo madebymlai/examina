@@ -604,18 +604,21 @@ IMPORTANT:
 - If exercise asks definition AND computation, mark as hybrid with both
 
 UNIFIED KNOWLEDGE MODEL (ONE knowledge_item per exercise):
-Extract the SINGLE PRIMARY skill that this exercise tests:
+Identify the BEST concept - the core skill this exercise actually tests:
 
-CRITICAL - ONE CONCEPT RULE:
-- Each exercise tests ONE primary skill - identify and extract ONLY that
-- Ask: "What is the MAIN thing a student must know to solve this?"
-- That single skill is your knowledge_item - nothing else!
+CRITICAL - BEST CONCEPT RULE:
+- Each exercise tests ONE core skill - find the BEST one that captures it
+- Ask: "If a student fails this exercise, what specific skill are they missing?"
+- Ask: "What would this exercise be called in a study guide?"
+- That core skill is your knowledge_item - the most valuable thing to learn
 
-EXTRACTION RULES (semantic, not keyword-based):
-- If exercise asks to PERFORM an action → extract the action skill (procedure)
-- If exercise asks to EXPLAIN/DEFINE something → extract the concept (definition)
-- If exercise asks BOTH → extract the DOMINANT one (usually the procedure)
-- Do NOT extract secondary concepts that are merely context
+SELECTION CRITERIA (pick the BEST, not just any):
+- Pick the skill that, if mastered, would guarantee solving this exercise
+- Pick the most SPECIFIC skill (not generic like "problem solving")
+- Pick the skill the PROFESSOR wants to test (exam perspective)
+- If exercise asks to PERFORM → the procedure/algorithm
+- If exercise asks to EXPLAIN → the definition/concept
+- If BOTH → pick whichever is more challenging to master
 
 1. For PROCEDURES (step-by-step methods):
    - knowledge_type: "procedure" or "algorithm"
