@@ -593,7 +593,23 @@ IMPORTANT:
 - If exercise asks definition AND computation, mark as hybrid with both
 
 UNIFIED KNOWLEDGE MODEL (knowledge_items array):
-Extract ALL knowledge units from the exercise into the knowledge_items array:
+Extract ONLY knowledge units that are ACTUALLY TESTED by this exercise:
+
+CRITICAL - AVOID FALSE EXTRACTION:
+- Extract ONLY skills the exercise DIRECTLY tests, NOT concepts merely mentioned
+- Ask: "If a student fails this exercise, what specific skill are they missing?"
+- That skill is what you extract - nothing else!
+
+EXTRACTION RULES (semantic, not keyword-based):
+- If exercise asks to PERFORM an action → extract the action skill (procedure)
+- If exercise asks to EXPLAIN/DEFINE something → extract the concept (definition)
+- If exercise asks BOTH → extract both
+- Do NOT extract definitions for concepts that are only used as context for a procedure
+
+QUANTITY GUIDELINE:
+- Most exercises test 1-2 skills, rarely 3
+- If you extract 4+ items from one exercise, you're probably over-extracting
+- Focus on the PRIMARY skill being tested
 
 1. For PROCEDURES (step-by-step methods):
    - knowledge_type: "procedure" or "algorithm"
