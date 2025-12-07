@@ -207,13 +207,8 @@ Identify the exact patterns used and return Python regex patterns:
    - "[-•*]\\s+" matches "- ", "• " (bullets, no capture group needed)
 
 3. SOLUTION_PATTERN - Keyword or regex for solution sections (if any).
-   Examples: "Soluzione", "Solution", "Answer", "Ответ"
 
-4. SUB_TRIGGERS - Array of regex patterns for phrases that PRECEDE sub-questions.
-   ONLY needed when sub_pattern uses the SAME marker type as exercise_pattern (both numbers, or both letters).
-   These phrases indicate "what follows are sub-questions, not new exercises".
-   Examples: "Si richiede di\\s*:", "Answer the following\\s*:"
-   Return null if sub_pattern uses DIFFERENT marker type than exercise_pattern.
+4. SUB_TRIGGERS - Phrases that PRECEDE sub-questions. Only needed if sub_pattern could match exercise markers (e.g., both are "number + punctuation" with no keyword). Return null if patterns are unambiguous.
 
 Return ONLY valid JSON:
 {{"mode": "pattern", "exercise_pattern": "regex string", "sub_pattern": "regex string or null", "solution_pattern": "keyword or null", "sub_triggers": ["array of regex strings"] or null}}
