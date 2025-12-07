@@ -348,19 +348,41 @@ Return valid JSON:
         knowledge_item_name: str,
     ) -> GeneratedExercise:
         """Parse JSON response from exercise generation."""
-        # Try to extract JSON
-        json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
-
-        if json_match:
-            try:
-                data = json.loads(json_match.group())
+        # Try to parse the entire response as JSON first
+        try:
+            data = json.loads(response)
+            if isinstance(data, dict) and 'exercise_text' in data:
                 return GeneratedExercise(
                     exercise_text=data.get('exercise_text', ''),
                     expected_answer=data.get('expected_answer', ''),
                     exercise_type=data.get('exercise_type', 'explanation'),
                 )
-            except (json.JSONDecodeError, ValueError, TypeError):
-                pass
+        except json.JSONDecodeError:
+            pass
+
+        # Try to find JSON object in response (handles markdown code blocks)
+        # Find the outermost { } pair by counting braces
+        start_idx = response.find('{')
+        if start_idx != -1:
+            brace_count = 0
+            for i, char in enumerate(response[start_idx:], start_idx):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        json_str = response[start_idx:i+1]
+                        try:
+                            data = json.loads(json_str)
+                            if isinstance(data, dict) and 'exercise_text' in data:
+                                return GeneratedExercise(
+                                    exercise_text=data.get('exercise_text', ''),
+                                    expected_answer=data.get('expected_answer', ''),
+                                    exercise_type=data.get('exercise_type', 'explanation'),
+                                )
+                        except json.JSONDecodeError:
+                            pass
+                        break
 
         # Fallback: use response as exercise text
         return GeneratedExercise(
@@ -376,12 +398,10 @@ Return valid JSON:
         student_answer: str,
     ) -> ReviewEvaluation:
         """Parse JSON response from evaluation."""
-        # Try to extract JSON
-        json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
-
-        if json_match:
-            try:
-                data = json.loads(json_match.group())
+        # Try to parse the entire response as JSON first
+        try:
+            data = json.loads(response)
+            if isinstance(data, dict) and 'score' in data:
                 score = float(data.get('score', 0.0))
                 return ReviewEvaluation(
                     score=score,
@@ -389,8 +409,34 @@ Return valid JSON:
                     feedback=data.get('feedback', 'Answer evaluated.'),
                     correct_answer=data.get('correct_answer', expected_answer),
                 )
-            except (json.JSONDecodeError, ValueError, TypeError):
-                pass
+        except json.JSONDecodeError:
+            pass
+
+        # Try to find JSON object in response (handles markdown code blocks)
+        # Find the outermost { } pair by counting braces
+        start_idx = response.find('{')
+        if start_idx != -1:
+            brace_count = 0
+            for i, char in enumerate(response[start_idx:], start_idx):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        json_str = response[start_idx:i+1]
+                        try:
+                            data = json.loads(json_str)
+                            if isinstance(data, dict) and 'score' in data:
+                                score = float(data.get('score', 0.0))
+                                return ReviewEvaluation(
+                                    score=score,
+                                    is_correct=data.get('is_correct', score >= 0.7),
+                                    feedback=data.get('feedback', 'Answer evaluated.'),
+                                    correct_answer=data.get('correct_answer', expected_answer),
+                                )
+                        except json.JSONDecodeError:
+                            pass
+                        break
 
         # Fallback
         return self._fallback_evaluation(expected_answer, student_answer)

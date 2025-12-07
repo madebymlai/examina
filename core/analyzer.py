@@ -1,6 +1,6 @@
 """
 AI-powered exercise analyzer for Examina.
-Handles exercise merging, topic discovery, and core loop identification.
+Extracts knowledge items from exercises for spaced repetition learning.
 """
 
 import json
@@ -15,6 +15,27 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from models.llm_manager import LLMManager, LLMResponse
 from storage.database import Database
 from config import Config
+
+# Knowledge item types - what kind of knowledge is being tested
+KNOWLEDGE_TYPES = [
+    "procedure",     # Step-by-step method to solve a problem
+    "algorithm",     # Formal algorithm with specific steps
+    "definition",    # Formal definition of a concept
+    "theorem",       # Mathematical/scientific theorem
+    "proof",         # Proof of a theorem or property
+    "derivation",    # Derivation of a formula or result
+    "formula",       # Mathematical formula to remember
+    "fact",          # Factual information to memorize
+    "key_concept",   # Important concept to understand
+]
+
+# Learning approaches - how to best teach this knowledge
+LEARNING_APPROACHES = [
+    "procedural",    # Step-by-step problem solving
+    "conceptual",    # Understanding principles and "why"
+    "factual",       # Memorizing facts/terminology
+    "analytical",    # Critical thinking, evaluating evidence
+]
 
 # Type checking imports (avoid circular dependencies)
 if TYPE_CHECKING:
@@ -31,22 +52,10 @@ except ImportError as e:
 
 
 @dataclass
-class ProcedureInfo:
-    """Information about a single procedure/algorithm in an exercise."""
-    name: str
-    type: str  # design, transformation, verification, minimization, analysis, other
-    steps: List[str]
-    point_number: Optional[int] = None
-    transformation: Optional[Dict[str, str]] = None  # {"source_format": "X", "target_format": "Y"}
-    learning_type: str = "conceptual"  # procedural, conceptual, factual, analytical
-
-
-@dataclass
 class KnowledgeItemInfo:
     """Unified knowledge item extracted from exercise analysis.
 
-    Replaces both ProcedureInfo and prerequisite_concepts with a single
-    unified format that supports all knowledge types.
+    The primary format for knowledge extraction. Replaces ProcedureInfo.
     """
     name: str  # snake_case identifier
     knowledge_type: str  # definition, theorem, proof, procedure, fact, formula, algorithm, etc.
@@ -63,60 +72,18 @@ class AnalysisResult:
     is_fragment: bool
     should_merge_with_previous: bool
     difficulty: Optional[str]
-    variations: Optional[List[str]]
     confidence: float
-    procedures: List[ProcedureInfo]  # NEW: Multiple procedures support
-
-    # Phase 9.1: Exercise type detection
-    exercise_type: Optional[str] = 'procedural'  # 'procedural', 'theory', 'proof', 'hybrid'
-    type_confidence: float = 0.0  # Confidence in type classification
-    proof_keywords: Optional[List[str]] = None  # Detected proof keywords if any
-    theory_metadata: Optional[Dict[str, Any]] = None  # Theory-specific metadata
-
-    # Phase 9.2: Theory question categorization
-    theory_category: Optional[str] = None  # 'definition', 'theorem', 'proof', 'explanation', 'derivation', 'concept'
-    theorem_name: Optional[str] = None  # Name of theorem if applicable
-    concept_id: Optional[str] = None  # ID of main concept
-    # prerequisite_concepts: List of concept objects with per-concept variation info
-    # Each object: {"concept_id": str, "parent_concept_name": str|None, "variation_parameter": str|None}
-    # Also accepts legacy string format for backward compatibility
-    prerequisite_concepts: Optional[List[Any]] = None  # List of concept dicts or strings (backward compat)
-
-    # Unified Knowledge Model: All knowledge items extracted from the exercise
-    # Replaces both procedures and prerequisite_concepts with unified format
     knowledge_items: Optional[List['KnowledgeItemInfo']] = None
 
-    # Backward compatibility fields (derived from first procedure)
-    @property
-    def core_loop_id(self) -> Optional[str]:
-        """Primary core loop ID (first procedure)."""
-        if self.procedures:
-            return self._normalize_core_loop_id(self.procedures[0].name)
-        return None
-
-    @property
-    def core_loop_name(self) -> Optional[str]:
-        """Primary core loop name (first procedure)."""
-        if self.procedures:
-            return self.procedures[0].name
-        return None
-
-    @property
-    def procedure(self) -> Optional[List[str]]:
-        """Primary procedure steps (first procedure)."""
-        if self.procedures:
-            return self.procedures[0].steps
-        return None
-
     @staticmethod
-    def _normalize_core_loop_id(core_loop_name: Optional[str]) -> Optional[str]:
-        """Normalize core loop name to ID."""
-        if not core_loop_name:
+    def _normalize_name(name: Optional[str]) -> Optional[str]:
+        """Normalize knowledge item name to snake_case ID."""
+        if not name:
             return None
-        core_loop_id = core_loop_name.lower()
-        core_loop_id = re.sub(r'[^\w\s-]', '', core_loop_id)
-        core_loop_id = re.sub(r'[\s-]+', '_', core_loop_id)
-        return core_loop_id
+        normalized = name.lower()
+        normalized = re.sub(r'[^\w\s-]', '', normalized)
+        normalized = re.sub(r'[\s-]+', '_', normalized)
+        return normalized
 
 
 class ExerciseAnalyzer:
@@ -226,56 +193,9 @@ class ExerciseAnalyzer:
         if not data:
             return self._default_analysis_result()
 
-        # Parse procedures (new format) or fallback to old format
-        procedures = []
-        if "procedures" in data and data["procedures"]:
-            # New format: multiple procedures
-            for proc_data in data["procedures"]:
-                # Debug: log learning_type from LLM
-                llm_learning_type = proc_data.get("learning_type")
-                print(f"[DEBUG] Procedure '{proc_data.get('name')}' learning_type from LLM: {llm_learning_type}")
-                procedures.append(ProcedureInfo(
-                    name=proc_data.get("name", "Unknown Procedure"),
-                    type=proc_data.get("type", "other"),
-                    steps=proc_data.get("steps", []),
-                    point_number=proc_data.get("point_number"),
-                    transformation=proc_data.get("transformation"),
-                    learning_type=proc_data.get("learning_type", "conceptual"),
-                ))
-        elif "core_loop_name" in data and data["core_loop_name"]:
-            # Old format: single procedure - convert to new format
-            procedures.append(ProcedureInfo(
-                name=data["core_loop_name"],
-                type="other",  # Unknown type in old format
-                steps=data.get("procedure", []),
-                point_number=None,
-                transformation=None,
-                learning_type="conceptual",  # Default for old format
-            ))
-
-        # Normalize procedures to primary language if monolingual mode enabled
-        if self.monolingual and procedures:
-            procedures = self._normalize_procedures_to_primary_language(procedures)
-
-        # Phase 9.1: Extract exercise type information
-        exercise_type = data.get("exercise_type", "procedural")
-        type_confidence = data.get("type_confidence", 0.5)
-        proof_keywords = data.get("proof_keywords", [])
-        theory_metadata = data.get("theory_metadata")
-
-        # Phase 9.2: Extract theory categorization information
-        theory_category = data.get("theory_category")
-        theorem_name = data.get("theorem_name")
-        concept_id = data.get("concept_id")
-        # prerequisite_concepts now contains per-concept variation info
-        # Format: [{"concept_id": str, "parent_concept_name": str|None, "variation_parameter": str|None}, ...]
-        prerequisite_concepts = data.get("prerequisite_concepts")
-
-        # Parse unified knowledge_item (ONE per exercise)
-        # Also handle legacy knowledge_items array (take first item only)
+        # Parse knowledge_item (ONE per exercise)
         knowledge_items = []
         if "knowledge_item" in data and data["knowledge_item"]:
-            # New format: single object
             item_data = data["knowledge_item"]
             knowledge_items.append(KnowledgeItemInfo(
                 name=item_data.get("name", "unknown"),
@@ -285,35 +205,13 @@ class ExerciseAnalyzer:
                 parent_name=item_data.get("parent_name"),
                 variation_parameter=item_data.get("variation_parameter"),
             ))
-        elif "knowledge_items" in data and data["knowledge_items"]:
-            # Legacy format: take first item only
-            item_data = data["knowledge_items"][0]
-            knowledge_items.append(KnowledgeItemInfo(
-                name=item_data.get("name", "unknown"),
-                knowledge_type=item_data.get("knowledge_type", "key_concept"),
-                learning_approach=item_data.get("learning_approach"),
-                content=item_data.get("content"),
-                parent_name=item_data.get("parent_name"),
-                variation_parameter=item_data.get("variation_parameter"),
-            ))
 
-        # Extract fields
         return AnalysisResult(
             is_valid_exercise=data.get("is_valid_exercise", True),
             is_fragment=data.get("is_fragment", False),
             should_merge_with_previous=data.get("should_merge_with_previous", False),
             difficulty=data.get("difficulty"),
-            variations=data.get("variations", []),
             confidence=data.get("confidence", 0.5),
-            procedures=procedures,
-            exercise_type=exercise_type,
-            type_confidence=type_confidence,
-            proof_keywords=proof_keywords if proof_keywords else None,
-            theory_metadata=theory_metadata,
-            theory_category=theory_category,
-            theorem_name=theorem_name,
-            concept_id=concept_id,
-            prerequisite_concepts=prerequisite_concepts,
             knowledge_items=knowledge_items if knowledge_items else None,
         )
 
@@ -336,8 +234,7 @@ class ExerciseAnalyzer:
 Your task is to analyze this text and determine:
 1. Is it a valid, complete exercise? Or just exam instructions/headers?
 2. Is it a fragment that should be merged with other parts?
-3. What topic does it cover?
-4. What is the core solving procedure (core loop)?
+3. What is the core skill/knowledge being tested?
 
 EXERCISE TEXT:
 ```
@@ -359,271 +256,61 @@ Does this exercise appear to be a continuation or sub-part of the previous one?
         if existing_context:
             base_prompt += self._build_context_section(existing_context)
 
+        # Build knowledge type and learning approach options from constants
+        knowledge_types_str = "|".join(KNOWLEDGE_TYPES)
+        learning_approaches_str = "|".join(LEARNING_APPROACHES)
+
         # Add language instruction (supports any ISO 639-1 language)
         base_prompt += f"""
-IMPORTANT: {self._language_instruction("Respond")} All procedure names and steps must be in {self._language_name()} language.
+IMPORTANT: {self._language_instruction("Respond")} All names must be in {self._language_name()} language.
 
-Respond in JSON format with:
+Respond in JSON format:
 {{
-  "is_valid_exercise": true/false,  // false if it's just exam instructions or headers
-  "is_fragment": true/false,  // true if incomplete or part of larger exercise
-  "should_merge_with_previous": true/false,  // true if continuation of previous
+  "is_valid_exercise": true/false,  // false if just exam rules/headers
+  "is_fragment": true/false,  // true if incomplete
+  "should_merge_with_previous": true/false,
   "difficulty": "easy|medium|hard",
-  "variations": ["variation1", ...],  // specific variants used
-  "confidence": 0.0-1.0,  // your confidence in this analysis
-  "procedures": [  // ALL distinct procedures/algorithms required (NEW: can be multiple!)
-    {{
-      "name": "procedure name",  // e.g., "[Entity] Design", "[Entity A] to [Entity B] Conversion"
-      "type": "design|transformation|verification|minimization|analysis|other",
-      "steps": ["step 1", "step 2", ...],  // solving steps for this procedure
-      "point_number": 1,  // which numbered point (1, 2, 3, etc.) - null if not applicable
-      "learning_type": "procedural|conceptual|factual|analytical",  // How to best teach this
-      "transformation": {{  // ONLY if type=transformation
-        "source_format": "format name",  // source entity/format from exercise
-        "target_format": "format name"   // target entity/format from exercise
-      }}
-    }}
-  ],
-  "exercise_type": "procedural|theory|proof|hybrid",  // Type of exercise (Phase 9.1)
-  "type_confidence": 0.0-1.0,  // Confidence in exercise type classification
-  "proof_keywords": ["keyword1", ...],  // Detected proof keywords if any
-  "theory_metadata": {{  // Theory-specific metadata (optional)
-    "theorem_name": "name if applicable",
-    "requires_definition": true/false,
-    "requires_explanation": true/false
-  }},
-  "theory_category": "definition|theorem|axiom|property|explanation|derivation|concept|null",  // Phase 9.2: Theory category
-  "theorem_name": "specific theorem name if asking about a theorem",  // Phase 9.2: exact name from exercise
-  "concept_id": "normalized_concept_id",  // Phase 9.2: snake_case version of concept name
-  "prerequisite_concepts": [  // Phase 9.2: concepts needed, with optional variation info PER CONCEPT
-    {{
-      "concept_id": "snake_case_concept_name",
-      "parent_concept_name": "general/abstract concept name or null if not a variation",
-      "variation_parameter": "what makes this specific (e.g., 'base=2') or null"
-    }}
-  ],
-  "knowledge_item": {{  // UNIFIED KNOWLEDGE MODEL: ONE concept per exercise
-    "name": "snake_case_name",  // Normalized identifier for the PRIMARY skill tested
-    "knowledge_type": "procedure|definition|theorem|proof|fact|formula|algorithm|explanation|key_concept|derivation|principle",
-    "learning_approach": "procedural|conceptual|factual|analytical",  // HOW to best teach this
-    "content": {{}},  // Flexible JSON - for procedures: {{"steps": [...]}}, for definitions: {{"definition": "..."}}, etc.
-    "parent_name": "abstract parent name or null",  // For variations: the general concept this is a variation of
-    "variation_parameter": "what makes this specific (e.g., '2x2 matrix') or null"
+  "confidence": 0.0-1.0,
+  "knowledge_item": {{
+    "name": "snake_case_name",  // e.g., "base_conversion_binary", "fsm_design"
+    "knowledge_type": "{knowledge_types_str}",
+    "learning_approach": "{learning_approaches_str}",
+    "content": {{}},  // For procedures: {{"steps": [...]}}, for definitions: {{"definition": "..."}}
+    "parent_name": "abstract parent or null",  // If variation of general concept
+    "variation_parameter": "what makes specific or null"  // e.g., "2x2 matrix"
   }}
 }}
 
-IMPORTANT ANALYSIS GUIDELINES:
-- If text contains only exam rules (like "NON si può usare la calcolatrice"), mark as NOT valid exercise
-- If text is clearly a sub-question (starts with "1.", "2.") right after numbered list, it's a fragment
-- Core loop/procedure is the ALGORITHM/PROCEDURE to solve
+VALIDATION:
+- If text only contains exam rules ("NON si può usare la calcolatrice"), mark as NOT valid
+- If clearly a sub-question continuation, mark as fragment
 
-MULTI-PROCEDURE DETECTION:
-- If exercise has numbered points (1., 2., 3.), analyze EACH point separately
-- Each distinct procedure should have its own entry in "procedures" array
-- Set "point_number" to indicate which numbered point it belongs to
-- If exercise requires multiple procedures (e.g., "design AND verify"), list ALL of them
-- For transformations/conversions (A→B, X→Y, etc.), set type="transformation" and fill "transformation" object
+KNOWLEDGE ITEM (CRITICAL - the ONE core skill being tested):
+Ask: "If a student fails this exercise, what specific skill are they missing?"
+Ask: "What would this exercise be called in a study guide?"
 
-LEARNING TYPE DETECTION (for each procedure):
-Determine HOW to best teach this procedure:
-- "procedural": Step-by-step problem solving - math, algorithms, calculations, design processes
-- "conceptual": Understanding definitions, principles, theories - explaining concepts and "why"
-- "factual": Memorizing facts, dates, events, terminology - recall-based knowledge
-- "analytical": Critical thinking, arguments, case analysis - evaluating perspectives and evidence
-
-PROCEDURE NAMING (CRITICAL - be specific, not generic!):
-Procedure names must include the SPECIFIC ENTITY being acted upon, not category/topic names.
-
-Pattern: [Action Type] + [Specific Entity from Exercise Text]
-
-How to identify the entity:
-1. Find the concrete noun in the exercise that the action operates on
-2. It should be a specific name that appears in the exercise text
-3. NOT a broad category that could contain multiple different things
-
-Test: "Does this exact name appear in the exercise as the thing being worked on?"
-- YES → Use it in the procedure name
-- NO → You're using a category name, look for the actual entity
-
-PROCEDURE IDENTITY RULES (CRITICAL - when to keep separate vs merge):
-Two procedures are THE SAME if they:
-- Solve the EXACT same problem type with the SAME algorithm
-- Only differ in language or minor phrasing
-
-Two procedures are DIFFERENT (keep separate!) if they:
-- Have different procedure types (design ≠ verify ≠ minimize)
-- Transform in different directions (A→B ≠ B→A)
-- Use fundamentally different algorithms for same goal
-
-MUST STAY SEPARATE (even if in same topic):
-- "Design X" vs "Verify X" vs "Minimize X" (different procedure types)
-- "A to B Conversion" vs "B to A Conversion" (different transformation directions)
-- "Method 1 for X" vs "Method 2 for X" (different algorithms for same goal)
-
-CAN BE MERGED (same procedure, name variations):
-- Same algorithm with different word order: "X Design" = "Design X"
-- Same algorithm in different languages: English name = translated name
-- Same algorithm with abbreviation: Full name = common abbreviation
-
-EXERCISE TYPE CLASSIFICATION (Phase 9.1):
-Classify based on WHAT the exercise asks the student to do. Use your language understanding - these patterns apply in ANY language.
-
-- **procedural**: Exercise requires applying an algorithm/procedure to solve a problem
-  * Asks to design, calculate, solve, convert, implement, construct, build, compute
-  * Has clear input → process → output structure
-  * Focuses on HOW to solve (execution of steps)
-
-- **theory**: Exercise asks for definitions, explanations, or conceptual understanding
-  * Asks to define, explain, describe, state what something is, clarify a concept
-  * Asks for understanding, not computation
-  * No procedural work required
-
-- **proof**: Exercise requires proving a theorem, property, or statement
-  * Asks to prove, demonstrate, show that something is true, verify a property
-  * Requires logical reasoning and mathematical proof structure
-  * May ask to prove theorems, properties, or general statements
-
-- **hybrid**: Exercise combines multiple types
-  * Has both procedural AND theory/proof components
-  * Example: "Prove X, then use it to calculate Y"
-
-IMPORTANT: Detect exercise type from semantic meaning, not keyword matching. The LLM understands all languages.
-
-THEORY QUESTION CATEGORIZATION (Phase 9.2):
-For exercises with exercise_type="theory" or "hybrid", categorize into specific theory categories.
-Detect category from semantic meaning - the LLM understands all languages.
-
-**definition**: Asks for a formal definition of a concept, term, or object
-  * Asks WHAT something IS (not how it works or why)
-  * Requests a precise, formal characterization
-  * Set concept_id to normalized name of the concept being defined
-
-**theorem**: Asks to state, explain, or apply a specific theorem
-  * References a named theorem, proposition, or lemma
-  * Asks to state the content of a known mathematical/scientific result
-  * Set theorem_name to specific theorem name
-  * Set concept_id to theorem identifier
-
-**axiom**: Asks about axioms, postulates, or fundamental properties
-  * Asks about foundational assumptions that are accepted without proof
-  * Refers to starting points or basic principles of a system
-  * Set concept_id to axiom system
-
-**property**: Asks about properties, characteristics, or conditions
-  * Asks what attributes or characteristics something has
-  * Focuses on features, qualities, or conditions that hold
-  * Set concept_id to property being discussed
-
-**explanation**: Asks to explain HOW or WHY something works
-  * Asks for understanding of mechanisms or causation
-  * Requires describing a process or reasoning
-  * Set concept_id to concept being explained
-
-**derivation**: Asks to derive or show how to obtain a result
-  * Asks to show the steps to arrive at a formula or result
-  * Requires mathematical manipulation to obtain something
-  * Set concept_id to formula/result being derived
-
-**concept**: General conceptual question not fitting other categories
-  * Use for understanding checks, conceptual comparisons, relationships
-  * Asks about relationships between concepts
-  * Set concept_id to main concept discussed
-
-PREREQUISITE CONCEPT DETECTION (CRITICAL - for ALL exercise types):
-- Identify theoretical concepts, methods, or techniques used in this exercise
-- Set prerequisite_concepts for BOTH procedural AND theory exercises
-- For procedural exercises: extract the underlying concepts the procedure applies
-- For theory exercises: extract foundational concepts needed to understand this one
-- List 3-7 most important concepts as normalized IDs
-- ALWAYS fill this field - every exercise uses theoretical concepts!
-
-CONCEPT VARIATION DETECTION (per-concept in prerequisite_concepts array):
-For EACH concept in prerequisite_concepts, determine if it's a VARIATION of a general concept:
-
-Each concept object has:
-- concept_id: The normalized snake_case concept name (REQUIRED)
-- parent_concept_name: The GENERAL/ABSTRACT form if this is a variation, null otherwise
-- variation_parameter: What makes this specific variation different, null if not a variation
-
-Examples of prerequisite_concepts array:
-[
-  {{"concept_id": "base_2_conversion", "parent_concept_name": "Number Base Conversion", "variation_parameter": "base=2"}},
-  {{"concept_id": "matrix_multiplication", "parent_concept_name": null, "variation_parameter": null}},
-  {{"concept_id": "eigenvalue_computation", "parent_concept_name": "Eigenvalue Theory", "variation_parameter": "method=characteristic_polynomial"}}
-]
-
-VARIATION DETECTION RULE (domain-agnostic):
-- If learning one concept means you can handle another → they share a parent (are variations)
-- If each requires fundamentally different knowledge → they are separate concepts (not variations)
-- parent_concept_name should be the GENERAL form (may not exist yet - system creates it)
-
-CONCEPT ID NORMALIZATION:
-- Convert concept names to lowercase IDs with underscores
-- Pattern: "Concept Name" → "concept_name"
-- Remove articles, prepositions when possible
-- Keep acronyms/numbers as-is: "X 123" → "x_123"
-
-IMPORTANT:
-- theory_category is ONLY for theory/hybrid exercises (null for procedural)
-- For hybrid exercises, fill BOTH procedures array AND theory fields
-- If exercise asks definition AND computation, mark as hybrid with both
-
-UNIFIED KNOWLEDGE MODEL (ONE knowledge_item per exercise):
-Identify the BEST concept - the core skill this exercise actually tests:
-
-CRITICAL - BEST CONCEPT RULE:
-- Each exercise tests ONE core skill - find the BEST one that captures it
-- Ask: "If a student fails this exercise, what specific skill are they missing?"
-- Ask: "What would this exercise be called in a study guide?"
-- That core skill is your knowledge_item - the most valuable thing to learn
-
-SELECTION CRITERIA (pick the BEST, not just any):
-- Pick the skill that, if mastered, would guarantee solving this exercise
-- Pick the most SPECIFIC skill (not generic like "problem solving")
-- Pick the skill the PROFESSOR wants to test (exam perspective)
-
-KNOWLEDGE TYPE SELECTION:
+KNOWLEDGE TYPE:
 - PERFORM/CALCULATE/DESIGN/BUILD → procedure or algorithm
 - EXPLAIN/DEFINE/DESCRIBE → definition or key_concept
 - PROVE/DERIVE/DEMONSTRATE → proof or derivation
 - STATE/RECALL (a theorem/law) → theorem or formula
 - MEMORIZE/KNOW (a fact) → fact
-- If BOTH action + explanation → pick the more challenging one
 
-1. For PROCEDURES (step-by-step methods):
-   - knowledge_type: "procedure" or "algorithm"
-   - learning_approach: usually "procedural"
-   - content: {{"steps": ["step 1", "step 2", ...], "when_to_use": "...", "common_mistakes": [...]}}
+NAMING (be specific!):
+- Use the SPECIFIC entity from exercise text
+- Pattern: action + entity (e.g., "fsm_design", "binary_to_decimal_conversion")
+- NOT generic: "problem_solving", "exercise_1"
 
-2. For DEFINITIONS/CONCEPTS:
-   - knowledge_type: "definition", "key_concept", "theorem", "formula"
-   - learning_approach: usually "conceptual" or "factual"
-   - content: {{"definition": "...", "examples": [...], "related_concepts": [...]}}
-
-3. For PROOFS:
-   - knowledge_type: "proof" or "derivation"
-   - learning_approach: "procedural" or "analytical"
-   - content: {{"proof_structure": [...], "key_insight": "..."}}
-
-VARIATION DETECTION in knowledge_items:
-- If a knowledge item is a specific case of a general concept, set parent_name and variation_parameter
-- Example: "eigenvalue_2x2" → parent_name="eigenvalue", variation_parameter="2x2 matrix"
+VARIATION:
+- If specific case of general skill: set parent_name and variation_parameter
+- Example: "eigenvalue_2x2" → parent_name="eigenvalue_computation", variation_parameter="2x2 matrix"
 - If NOT a variation: parent_name=null, variation_parameter=null
 
-CONTEXT EXCLUSION (CRITICAL - avoid word problem scenarios!):
-- Extract ONLY course concepts, NOT scenario/context items from word problems
-- Ask: "Would this appear in the course textbook, or is it just the word problem setting?"
-- Real-world objects, application domains are usually CONTEXT, not course concepts
-- Test: "Is this something a student learns/studies, or just where the problem takes place?"
-- Test: "Does this have a formal definition/procedure/theorem in the course, or is it just scenery?"
+CONTEXT EXCLUSION:
+- Extract ONLY course concepts, NOT word problem scenarios
+- Test: "Does this have a formal definition/procedure in the course, or just scenery?"
 
-BACKWARD COMPATIBILITY:
-- Even if exercise has only ONE procedure, still return it in "procedures" array
-- Extract actual solving steps if you can identify them
-- The first procedure in the array is considered the PRIMARY procedure
-- ALSO populate knowledge_item with the PRIMARY skill (single object, not array)
-
-Respond ONLY with valid JSON, no other text.
+Respond ONLY with valid JSON.
 """
 
         return base_prompt
@@ -699,69 +386,41 @@ CONTEXT RULES (CRITICAL):
             is_valid_exercise=True,
             is_fragment=False,
             should_merge_with_previous=False,
-            topic=None,
             difficulty=None,
-            variations=None,
             confidence=0.0,
-            procedures=[],  # Empty procedures list
-            exercise_type='procedural',  # Default type
-            type_confidence=0.0,
-            proof_keywords=None,
-            theory_metadata=None,
-            knowledge_items=None,  # Empty for unified model
+            knowledge_items=None,
         )
 
     def _build_result_from_cache(self, cache_hit: 'CacheHit', exercise_text: str) -> AnalysisResult:
         """Build AnalysisResult from cache hit (Option 3: Procedure Pattern Caching).
 
         Args:
-            cache_hit: Cache hit result containing cached procedures and metadata
+            cache_hit: Cache hit result containing cached knowledge items
             exercise_text: Original exercise text
 
         Returns:
             AnalysisResult built from cached data
         """
-        from core.procedure_cache import CacheHit
-
-        # Convert cached procedures to ProcedureInfo objects
-        # Handle two formats:
-        # 1. List of dicts (from analyzer): [{'name': '...', 'type': '...', 'steps': [...]}]
-        # 2. List of strings (from build command): ['Step 1', 'Step 2', 'Step 3']
-        procedures = []
-
-        if not cache_hit.procedures:
-            # Empty procedures list
-            pass
-        elif isinstance(cache_hit.procedures[0], str):
-            # Format 2: List of step strings - wrap in single ProcedureInfo
-            procedures.append(ProcedureInfo(
-                name=cache_hit.topic or 'Procedure',
-                type='other',
-                steps=cache_hit.procedures,  # Use the string list as steps
-                point_number=None,
-                transformation=None
-            ))
-        else:
-            # Format 1: List of ProcedureInfo dicts
-            for p in cache_hit.procedures:
-                procedures.append(ProcedureInfo(
-                    name=p.get('name', 'Unknown'),
-                    type=p.get('type', 'other'),
-                    steps=p.get('steps', []),
-                    point_number=p.get('point_number'),
-                    transformation=p.get('transformation')
+        # Convert cached data to KnowledgeItemInfo
+        knowledge_items = []
+        if cache_hit.knowledge_items:
+            for ki in cache_hit.knowledge_items:
+                knowledge_items.append(KnowledgeItemInfo(
+                    name=ki.get('name', 'unknown'),
+                    knowledge_type=ki.get('knowledge_type', 'key_concept'),
+                    learning_approach=ki.get('learning_approach'),
+                    content=ki.get('content'),
+                    parent_name=ki.get('parent_name'),
+                    variation_parameter=ki.get('variation_parameter'),
                 ))
 
         return AnalysisResult(
             is_valid_exercise=True,
             is_fragment=False,
             should_merge_with_previous=False,
-            topic=cache_hit.topic,
             difficulty=cache_hit.difficulty,
-            variations=cache_hit.variations,
             confidence=cache_hit.confidence,
-            procedures=procedures,
-            exercise_type='procedural'  # Default - cache doesn't store this
+            knowledge_items=knowledge_items if knowledge_items else None,
         )
 
     def _detect_primary_language(self, exercises: List[Dict[str, Any]], course_name: str) -> str:
@@ -800,96 +459,6 @@ CONTEXT RULES (CRITICAL):
             # Fallback to analysis language (supports any language)
             print(f"[INFO] Could not detect language, using fallback: {self.language}")
             return self.language
-
-    def _translate_procedure(self, procedure_info: ProcedureInfo, target_language: str) -> ProcedureInfo:
-        """Translate a procedure to target language.
-
-        Args:
-            procedure_info: Procedure to translate
-            target_language: Target language (e.g., "english", "italian")
-
-        Returns:
-            Translated ProcedureInfo
-        """
-        if not self.llm:
-            return procedure_info
-
-        # Build translation prompt
-        prompt = f"""Translate this procedure name and steps to {target_language}.
-Maintain technical accuracy and preserve the exact meaning.
-
-Original procedure:
-Name: {procedure_info.name}
-Type: {procedure_info.type}
-Steps:
-{chr(10).join([f"{i+1}. {step}" for i, step in enumerate(procedure_info.steps)])}
-
-Return ONLY valid JSON in this format:
-{{
-  "name": "translated procedure name",
-  "steps": ["translated step 1", "translated step 2", ...]
-}}
-
-No markdown code blocks, just JSON."""
-
-        try:
-            response = self.llm.generate(
-                prompt=prompt,
-                temperature=0.3,
-                json_mode=True
-            )
-
-            if response.success:
-                data = self.llm.parse_json_response(response)
-                if data and 'name' in data and 'steps' in data:
-                    return ProcedureInfo(
-                        name=data['name'],
-                        type=procedure_info.type,
-                        steps=data['steps'],
-                        point_number=procedure_info.point_number,
-                        transformation=procedure_info.transformation
-                    )
-        except Exception as e:
-            print(f"[WARNING] Failed to translate procedure '{procedure_info.name}': {e}")
-
-        # Fallback: return original
-        return procedure_info
-
-    def _normalize_procedures_to_primary_language(self, procedures: List[ProcedureInfo]) -> List[ProcedureInfo]:
-        """Normalize all procedures to primary language in monolingual mode.
-
-        Args:
-            procedures: List of procedures to normalize
-
-        Returns:
-            List of procedures in primary language
-        """
-        if not self.monolingual or not self.primary_language or not self.translation_detector:
-            return procedures
-
-        normalized_procedures = []
-
-        for proc in procedures:
-            # Detect language of procedure
-            proc_language = self.translation_detector.detect_language(proc.name)
-
-            if proc_language == "unknown":
-                # Can't detect, keep as is
-                normalized_procedures.append(proc)
-                continue
-
-            # Check if procedure is in primary language
-            if proc_language.lower() == self.primary_language.lower():
-                # Already in primary language
-                normalized_procedures.append(proc)
-            else:
-                # Translate to primary language
-                print(f"[MONOLINGUAL] Translating procedure '{proc.name}' from {proc_language} to {self.primary_language}")
-                translated_proc = self._translate_procedure(proc, self.primary_language)
-                print(f"  → '{translated_proc.name}'")
-                normalized_procedures.append(translated_proc)
-
-        return normalized_procedures
 
     def merge_exercises(self, exercises: List[Dict[str, Any]], skip_analyzed: bool = False) -> List[Dict[str, Any]]:
         """Merge exercise fragments into complete exercises.
