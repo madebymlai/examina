@@ -669,10 +669,10 @@ def _get_second_pass_results(
    Return "end_marker": the LAST 40-60 characters of the actual question (before junk like form fields, page numbers, exam instructions)
 
 2. For "parent_with_children" exercises:
-   Return "context_summary": a concise summary (1-2 sentences) of the essential setup/data that sub-questions need.
-   Include: problem data, numbers, constraints, shared task description
-   Exclude: exam instructions, form fields, verbose explanations, the sub-question texts themselves
-   If the parent is just instructions with no useful data, return null.
+   Return "context_summary": shared info that sub-questions need but don't have in their own text.
+   Good context: data, values, parameters, scenario setup that sub-questions reference.
+   If parent also contains its own question, include a brief summary of that question.
+   Return null if: sub-questions are independent and don't need shared info to be understood.
 
 EXERCISES:
 {exercises_text}
@@ -683,7 +683,6 @@ Return JSON with one entry per exercise above. Format:
 CRITICAL:
 - end_marker must be from the END of the question, not the beginning
 - end_marker should be 40-60 characters
-- context_summary should be concise (under 100 words)
 """
 
     try:
