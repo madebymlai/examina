@@ -1625,11 +1625,16 @@ class ExerciseSplitter:
             course_code: Course code for ID generation
             llm_manager: LLM manager for pattern detection (first pass)
             second_pass_llm: Optional LLM for second-pass (end markers, context summaries).
-                             Use a high-quality model like Sonnet for best results.
+                             If not provided, uses llm_manager for all calls.
+                             DeepSeek produces equivalent results to Sonnet at 20x lower cost.
 
         Returns:
             List of extracted exercises with context
         """
+        # Default second_pass_llm to llm_manager (typically DeepSeek - same quality, 20x cheaper)
+        if second_pass_llm is None:
+            second_pass_llm = llm_manager
+
         # Step 1: Concatenate all page text with position tracking
         full_text = ""
         page_lookup: Dict[int, int] = {}  # char_position -> page_number
