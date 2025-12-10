@@ -647,24 +647,24 @@ def _get_parent_end_markers(
         for ex in exercises_info
     ])
 
-    prompt = f"""For each exercise below, identify the end_marker: the LAST 40-60 characters of the actual QUESTION.
+    prompt = f"""For each exercise below, identify the end_marker: the LAST 40-60 characters of the ENTIRE exercise question.
 
-The end_marker should be where the question text ends, BEFORE any:
-- Sub-questions (a), b), 1., 2., etc.)
+The end_marker should be at the END of all question content (INCLUDING any sub-questions like a), b), c) or 1., 2., 3.), BEFORE any:
 - Form fields or blank lines for answers
 - Solutions or answer sections
 - Page headers/footers
 - Exam instructions
+- Junk text between exercises
 
 EXERCISES:
 {exercises_text}
 
 Return JSON:
-{{"results": [{{"number": "1", "end_marker": "last 40-60 chars of question"}}, ...]}}
+{{"results": [{{"number": "1", "end_marker": "last 40-60 chars"}}, ...]}}
 
 CRITICAL:
-- end_marker must be from the END of the main question setup, not the beginning
-- If exercise has sub-questions, end_marker should be the text just BEFORE the first sub-question
+- If exercise ends with sub-questions, end_marker should be from the LAST sub-question
+- end_marker marks where THIS exercise ends, before junk or next exercise
 - end_marker should be 40-60 characters"""
 
     try:
@@ -1719,9 +1719,10 @@ class ExerciseSplitter:
                 )
 
                 # Build boundaries dict for sub detection
+                # Use question_start (after marker text) to exclude parent marker itself
                 parent_boundaries: Dict[str, Tuple[int, int]] = {}
                 for marker in parent_markers:
-                    start = marker.start_position
+                    start = marker.question_start  # Start AFTER parent marker text
                     end = parent_end_positions.get(marker.number, len(full_text))
                     parent_boundaries[marker.number] = (start, end)
 
