@@ -89,48 +89,50 @@ def detect_synonyms(
                         item_text += "\n  Exercises:\n" + "\n".join(exercise_snippets)
                 items_text.append(item_text)
 
-            prompt = f"""Identify knowledge item groups that should be MERGED into a single concept.
+            prompt = f"""Identify TRUE SYNONYM groups - items that are the EXACT SAME concept with different names.
 
 Items with exercise examples:
 {chr(10).join(items_text)}
 
-MERGE when items represent the SAME underlying skill or concept:
-- The exercises test the SAME technique or knowledge
-- A student who masters one item automatically masters the others
-- The difference is just naming/phrasing, not conceptual
+MERGE ONLY when items are TRUE SYNONYMS:
+- The ONLY difference is language/naming (e.g., Italian vs English name for same thing)
+- Exercises require the EXACT SAME steps/technique to solve
+- A single flashcard could teach both equally well
 
-DO NOT MERGE when items are genuinely different:
-- Exercises test DIFFERENT techniques (e.g., FSM design vs Boolean minimization)
-- Require different knowledge or problem-solving approaches
-- Would be separate topics in a course
+DO NOT MERGE when items are merely RELATED:
+- They are variations of a technique applied to different problem sizes/types
+- They apply the same concept to different problem domains
+- Mastering one gives partial (not complete) mastery of the other
+- They would get separate practice problems in a course
 
 Return JSON array of objects with:
-- "canonical": A clean, concise English name for this concept
+- "canonical": Pick the MOST SPECIFIC member name (prefer English, don't generalize)
 - "members": Array of input names that belong to this group
 
-Return [] if no groups found."""
+Return [] if uncertain or no TRUE synonyms found."""
         else:
             # Legacy prompt without exercise context
-            prompt = f"""Identify knowledge item groups that should be MERGED into a single concept.
+            prompt = f"""Identify TRUE SYNONYM groups - items that are the EXACT SAME concept with different names.
 
 Names (snake_case - treat underscores as spaces):
 {chr(10).join(f"- {item['name']}" for item in unique_items)}
 
-MERGE when items represent the SAME underlying skill or concept:
-- A student who masters one item automatically masters the others
-- A textbook would cover them in a single section, not separate chapters
-- The difference is just naming/phrasing, not conceptual
-- Items differ only by the specific instance used in a problem, not the underlying technique
+MERGE ONLY when items are TRUE SYNONYMS:
+- The ONLY difference is language/naming (e.g., Italian vs English name for same thing)
+- They require the EXACT SAME steps/technique to solve
+- A single flashcard could teach both equally well
 
-DO NOT MERGE when items are genuinely different:
-- Require different knowledge or techniques
-- Would be separate topics in a course
+DO NOT MERGE when items are merely RELATED:
+- They are variations of a technique applied to different problem sizes/types
+- They apply the same concept to different problem domains
+- Mastering one gives partial (not complete) mastery of the other
+- They would get separate practice problems in a course
 
 Return JSON array of objects with:
-- "canonical": A clean, concise English name for this concept (CREATE the best name, don't just pick from list)
+- "canonical": Pick the MOST SPECIFIC member name (prefer English, don't generalize)
 - "members": Array of input names that belong to this group
 
-Return [] if no groups found."""
+Return [] if uncertain or no TRUE synonyms found."""
 
         try:
             logger.info(f"Detecting synonyms among {len(unique_items)} {item_type} items (with_exercises={has_exercises})")
