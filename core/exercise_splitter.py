@@ -695,10 +695,14 @@ CRITICAL:
                 rough_end = rough_ends.get(num, len(full_text))
                 parent_text = full_text[start:rough_end]
 
-                # Find end_marker position in parent text
+                # Find end_marker position in parent text (search for LAST occurrence)
                 clean_marker = end_marker.strip().strip("...").strip("…").strip()
                 if len(clean_marker) >= 10:
-                    pos = _fuzzy_find(parent_text, clean_marker, 0)
+                    # Try rfind first for exact match (faster, finds last occurrence)
+                    pos = parent_text.rfind(clean_marker)
+                    if pos < 0:
+                        # Fall back to fuzzy find from start
+                        pos = _fuzzy_find(parent_text, clean_marker, 0)
                     if pos >= 0:
                         # Convert to absolute position
                         end_positions[num] = start + pos + len(clean_marker)
