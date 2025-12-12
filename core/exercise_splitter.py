@@ -642,6 +642,8 @@ def _normalize_unicode(s: str) -> str:
         # PDF Private Use Area chars (mathematical delimiters)
         '\uf8eb': '(', '\uf8ed': '(',  # Left brackets
         '\uf8f6': ')', '\uf8f8': ')',  # Right brackets
+        # Normalize all brackets to parentheses (LLM uses []{} for matrices/sets, PDF uses special chars → ())
+        '[': '(', ']': ')', '{': '(', '}': ')',
     }
     for old, new in replacements.items():
         s = s.replace(old, new)
@@ -705,29 +707,107 @@ def _fuzzy_find(text: str, search_term: str, start_from: int = 0) -> int:
         if match:
             return match.start()
 
-    # Last resort: collapse whitespace and match prefix
-    # Only use first 40 chars - LLM may clean up text differently than PDF
-    text_collapsed = re.sub(r'\s+', '', text_norm.lower())
-    search_collapsed = re.sub(r'\s+', '', search_norm.lower())
-    search_prefix = search_collapsed[:40]  # Match prefix (40 works, 50 fails due to PDF artifacts)
+    # Last resort: strip all non-alphanumeric chars for prefix match
+    # Handles all punctuation differences (commas, brackets, parens, etc.)
+    text_alnum = re.sub(r'[^a-z0-9]', '', text_norm.lower())
+    search_alnum = re.sub(r'[^a-z0-9]', '', search_norm.lower())
+    search_prefix = search_alnum[:50]  # Can use longer prefix since only alphanum
 
-    if search_prefix and len(search_prefix) <= len(text_collapsed):
-        idx = text_collapsed.find(search_prefix)
+    if search_prefix and len(search_prefix) <= len(text_alnum):
+        idx = text_alnum.find(search_prefix)
         if idx >= 0:
-            # Map collapsed index back to original text position
-            char_count = 0
-            norm_pos = 0
+            # Map alnum index back to original text position
+            alnum_count = 0
             for i, c in enumerate(text_norm):
                 if i < start_from:
-                    if not c.isspace():
-                        char_count += 1
+                    if c.isalnum():
+                        alnum_count += 1
                     continue
-                if not c.isspace():
-                    if char_count == idx:
-                        norm_pos = i
+                if c.isalnum():
+                    if alnum_count == idx:
+                        return i
+                    alnum_count += 1
+
+    return -1
+
+
+def _fuzzy_rfind(text: str, search_term: str, end_before: int = None) -> int:
+    """Find a term in text searching from end, with tolerance for OCR errors.
+
+    Like _fuzzy_find but returns LAST occurrence instead of first.
+    Use for end markers where we want the final occurrence.
+
+    Args:
+        text: Document text to search
+        search_term: Term to find
+        end_before: Position to end searching before (searches text[:end_before])
+
+    Returns:
+        Position of last match, or -1 if not found
+    """
+    if end_before is None:
+        end_before = len(text)
+
+    search_text = text[:end_before]
+
+    # First try exact match from end
+    pos = search_text.rfind(search_term)
+    if pos >= 0:
+        return pos
+
+    # Try case-insensitive from end
+    text_lower = search_text.lower()
+    search_lower = search_term.lower()
+    pos = text_lower.rfind(search_lower)
+    if pos >= 0:
+        return pos
+
+    # Try with normalized whitespace - find ALL matches, take last
+    words = search_term.split()
+    if words:
+        pattern_parts = [re.escape(word) for word in words]
+        search_pattern = r'\s+'.join(pattern_parts)
+        pattern = re.compile(search_pattern, re.IGNORECASE)
+        matches = list(pattern.finditer(search_text))
+        if matches:
+            return matches[-1].start()
+
+    # Try with Unicode normalization
+    text_norm = _normalize_unicode(search_text)
+    search_norm = _normalize_unicode(search_term)
+    pos = text_norm.lower().rfind(search_norm.lower())
+    if pos >= 0:
+        return pos
+
+    # Try normalized + whitespace flexibility - find all, take last
+    words = search_norm.split()
+    if words:
+        pattern_parts = [re.escape(word) for word in words]
+        search_pattern = r'\s*'.join(pattern_parts)
+        pattern = re.compile(search_pattern, re.IGNORECASE)
+        matches = list(pattern.finditer(text_norm))
+        if matches:
+            return matches[-1].start()
+
+    # Last resort: alphanumeric suffix match (search from end)
+    text_alnum = re.sub(r'[^a-z0-9]', '', text_norm.lower())
+    search_alnum = re.sub(r'[^a-z0-9]', '', search_norm.lower())
+    search_suffix = search_alnum[-50:] if len(search_alnum) > 50 else search_alnum
+
+    if search_suffix and len(search_suffix) <= len(text_alnum):
+        idx = text_alnum.rfind(search_suffix)
+        if idx >= 0:
+            # Map alnum index back to original text position
+            alnum_count = 0
+            last_match_pos = -1
+            for i, c in enumerate(text_norm):
+                if c.isalnum():
+                    if alnum_count == idx:
+                        last_match_pos = i
                         break
-                    char_count += 1
-            return norm_pos
+                    alnum_count += 1
+            if last_match_pos >= 0:
+                return last_match_pos
 
     return -1
 
@@ -839,11 +919,8 @@ CRITICAL:
                 # Find end_marker position in parent text (search for LAST occurrence)
                 clean_marker = end_marker.strip().strip("...").strip("…").strip()
                 if len(clean_marker) >= 10:
-                    # Try rfind first for exact match (faster, finds last occurrence)
-                    pos = parent_text.rfind(clean_marker)
-                    if pos < 0:
-                        # Fall back to fuzzy find from start
-                        pos = _fuzzy_find(parent_text, clean_marker, 0)
+                    # Use fuzzy rfind to find last occurrence with OCR tolerance
+                    pos = _fuzzy_rfind(parent_text, clean_marker)
                     if pos >= 0:
                         # Convert to absolute position
                         end_positions[num] = start + pos + len(clean_marker)
@@ -1223,10 +1300,16 @@ def _get_explicit_sub_questions(
     MAX_EXERCISE_CHARS = 15000
     exercises_text_parts = []
 
-    for boundary in boundaries:
+    for i, boundary in enumerate(boundaries):
         num = boundary.number
         start = boundary.start_pos
-        end = boundary.end_pos if boundary.end_pos else len(full_text)
+        # Use end_pos if set, otherwise use next boundary's start, otherwise end of text
+        if boundary.end_pos:
+            end = boundary.end_pos
+        elif i + 1 < len(boundaries):
+            end = boundaries[i + 1].start_pos
+        else:
+            end = len(full_text)
         exercise_text = full_text[start:end].strip()
 
         if len(exercise_text) > MAX_EXERCISE_CHARS:
@@ -1248,12 +1331,14 @@ Key distinction:
 - Sub-question: asks the student to DO something (produce an answer, calculation, drawing)
 - NOT a sub-question: GIVES INFORMATION to student
 
+IMPORTANT: Return the EXACT first 10-15 words as they appear in the text (copy verbatim, including any point values or markers).
+
 EXERCISES:
 {exercises_text}
 
 Return JSON in SAME ORDER as exercises above:
 {{"results": [
-  {{"sub_questions": ["start text of sub 1...", "start text of sub 2..."] or null}}
+  {{"sub_questions": ["exact first 10-15 words of sub 1...", "exact first 10-15 words of sub 2..."] or null}}
 ]}}"""
 
     try:
@@ -1293,6 +1378,92 @@ Return JSON in SAME ORDER as exercises above:
     except Exception as e:
         logger.warning(f"Explicit sub-question detection failed: {e}")
         return {}
+
+
+def _get_explicit_end_markers(
+    exercises: List[Exercise],
+    llm_manager: "LLMManager",
+) -> List[Exercise]:
+    """Call 4 for explicit mode: get end markers to trim exercise text.
+
+    Removes trailing artifacts (page numbers, form fields, etc.) from exercise text.
+
+    Args:
+        exercises: List of Exercise objects with potentially noisy text
+        llm_manager: LLM for end marker detection
+
+    Returns:
+        List of Exercise objects with trimmed text
+    """
+    if not exercises:
+        return exercises
+
+    logger.info(f"Getting end markers for {len(exercises)} exercises (Call 4)...")
+
+    # Build exercise info for LLM
+    exercises_text_parts = []
+    for ex in exercises:
+        # Show last 300 chars where end marker should be
+        text_preview = ex.text[-300:] if len(ex.text) > 300 else ex.text
+        exercises_text_parts.append(
+            f"Exercise {ex.exercise_number}:\n\"\"\"\n...{text_preview}\n\"\"\""
+        )
+
+    exercises_text = "\n\n".join(exercises_text_parts)
+
+    prompt = f"""For each exercise below, identify where the actual question ENDS.
+Return the last 30-50 characters of the actual question content (before any trailing junk like page numbers, form fields, or next exercise markers).
+
+EXERCISES (showing last ~300 chars of each):
+{exercises_text}
+
+Return JSON:
+{{"results": [
+  {{"number": "1.1", "end_marker": "last 30-50 chars of actual question"}},
+  ...
+]}}
+
+IMPORTANT: end_marker must be EXACT text from the exercise, used to find where to trim."""
+
+    try:
+        llm_response = llm_manager.generate(prompt, temperature=0.0)
+        response_text = llm_response.text if hasattr(llm_response, 'text') else str(llm_response)
+
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
+        if not json_match:
+            logger.warning("No JSON in end markers response")
+            return exercises
+
+        data = json.loads(json_match.group())
+        results = {item["number"]: item.get("end_marker") for item in data.get("results", [])}
+
+        # Apply end markers to trim exercise text
+        trimmed_count = 0
+        for ex in exercises:
+            end_marker = results.get(ex.exercise_number)
+            if not end_marker:
+                continue
+
+            # Find end marker in exercise text (search from end to get last occurrence)
+            pos = _fuzzy_rfind(ex.text, end_marker)
+            if pos >= 0:
+                # Find last word of marker in text (handles whitespace differences)
+                last_word = end_marker.split()[-1] if end_marker.split() else None
+                if last_word:
+                    # Search for last word from the found position
+                    last_word_pos = ex.text.find(last_word, pos)
+                    if last_word_pos >= 0:
+                        end_pos = last_word_pos + len(last_word)
+                        if end_pos < len(ex.text):
+                            ex.text = ex.text[:end_pos].strip()
+                            trimmed_count += 1
+
+        logger.info(f"Trimmed {trimmed_count}/{len(exercises)} exercises with end markers")
+        return exercises
+
+    except Exception as e:
+        logger.warning(f"End marker detection failed: {e}")
+        return exercises
 
 
 def _get_second_pass_results(
@@ -2288,6 +2459,11 @@ class ExerciseSplitter:
             exercises = _create_exercises_from_explicit_boundaries(
                 boundaries, explicit_subs, full_text, pdf_content, course_code, page_lookup
             )
+
+            # Call 4: Get end markers to trim trailing artifacts
+            if second_pass_llm:
+                exercises = _get_explicit_end_markers(exercises, second_pass_llm)
+
             # Enrich with page data and return
             exercises = self._enrich_with_page_data(exercises, pdf_content)
             logger.info(f"Explicit mode produced {len(exercises)} exercises")
