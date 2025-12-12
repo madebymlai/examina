@@ -382,7 +382,7 @@ CONTEXT RULES (CRITICAL):
             for ki in cache_hit.knowledge_items:
                 knowledge_items.append(KnowledgeItemInfo(
                     name=ki.get('name', 'unknown'),
-                    knowledge_type=ki.get('knowledge_type', 'key_concept'),
+                    knowledge_type=None,  # DEPRECATED - no longer extracted
                     learning_approach=ki.get('learning_approach'),
                 ))
 
