@@ -1369,6 +1369,15 @@ class ExerciseSplitter:
                     explicit_subs = asyncio.run(
                         _get_sub_start_markers_parallel(exercises_for_call3, second_pass_llm)
                     )
+
+                    # Validation: if only 1 sub found, Call 3 likely failed - treat as standalone
+                    for ex_num in list(explicit_subs.keys()):
+                        if len(explicit_subs[ex_num]) == 1:
+                            logger.warning(f"Exercise {ex_num}: expected multiple subs, got 1 - treating as standalone")
+                            del explicit_subs[ex_num]
+
+                    # Update boundaries_with_subs to only include exercises that still have subs
+                    boundaries_with_subs = [b for b in boundaries_with_subs if b.number in explicit_subs]
                 else:
                     explicit_subs = {}
             else:

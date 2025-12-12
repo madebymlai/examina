@@ -128,18 +128,12 @@ class ExerciseAnalyzer:
         return self.language.upper()
 
     def analyze_exercise(self, exercise_text: str, course_name: str,
-                        previous_exercise: Optional[str] = None,
-                        existing_context: Optional[Dict[str, Any]] = None,
                         parent_context: Optional[str] = None) -> AnalysisResult:
         """Analyze a single exercise.
 
         Args:
             exercise_text: Exercise text
             course_name: Course name for context
-            previous_exercise: Previous exercise text (for merge detection)
-            existing_context: Optional dict with existing entities for context-aware analysis:
-                - procedures: List[dict] with {"name": str, "type": str}
-                - concepts: List[dict] with {"name": str, "type": str}
             parent_context: Optional context from parent exercise (for sub-questions)
 
         Returns:
@@ -147,7 +141,7 @@ class ExerciseAnalyzer:
         """
         # Build prompt
         prompt = self._build_analysis_prompt(
-            exercise_text, course_name, previous_exercise, existing_context, parent_context
+            exercise_text, course_name, parent_context
         )
 
         # Call LLM
@@ -189,16 +183,12 @@ class ExerciseAnalyzer:
         )
 
     def _build_analysis_prompt(self, exercise_text: str, course_name: str,
-                               previous_exercise: Optional[str],
-                               existing_context: Optional[Dict[str, Any]] = None,
                                parent_context: Optional[str] = None) -> str:
         """Build prompt for exercise analysis.
 
         Args:
             exercise_text: Exercise text
             course_name: Course name
-            previous_exercise: Previous exercise (for merge detection)
-            existing_context: Optional dict with existing procedures/concepts
             parent_context: Optional context from parent exercise (for sub-questions)
 
         Returns:
@@ -206,10 +196,7 @@ class ExerciseAnalyzer:
         """
         base_prompt = f"""You are analyzing exam exercises for the course: {course_name}.
 
-Your task is to analyze this text and determine:
-1. Is it a valid, complete exercise? Or just exam instructions/headers?
-2. Is it a fragment that should be merged with other parts?
-3. What is the core skill/knowledge being tested?
+Extract the knowledge item (core skill/concept) being tested.
 
 EXERCISE TEXT:
 ```
@@ -217,29 +204,15 @@ EXERCISE TEXT:
 ```
 """
 
-        if previous_exercise:
-            base_prompt += f"""
-PREVIOUS EXERCISE:
-```
-{previous_exercise[:1000]}
-```
-
-Does this exercise appear to be a continuation or sub-part of the previous one?
-"""
-
         if parent_context:
             base_prompt += f"""
-PARENT CONTEXT (this is a sub-question):
+PARENT CONTEXT (background only):
 ```
 {parent_context[:1000]}
 ```
 
-Use this context to understand what topic/scenario this sub-question belongs to.
+This is background context. Name the knowledge item based on what THIS SUB-QUESTION specifically asks, not the parent context.
 """
-
-        # Add existing context if provided (Phase 3: Context Injection)
-        if existing_context:
-            base_prompt += self._build_context_section(existing_context)
 
         # Build learning approach options from constants
         learning_approaches_str = "|".join(LEARNING_APPROACHES)
@@ -250,9 +223,6 @@ IMPORTANT: {self._language_instruction("Respond")} All names must be in {self._l
 
 Respond in JSON format:
 {{
-  "is_valid_exercise": true/false,  // false if just exam rules/headers
-  "is_fragment": true/false,  // true if incomplete
-  "should_merge_with_previous": true/false,
   "difficulty": "easy|medium|hard",
   "confidence": 0.0-1.0,
   "knowledge_item": {{
@@ -261,25 +231,20 @@ Respond in JSON format:
   }}
 }}
 
-VALIDATION:
-- If text only contains exam rules ("NON si può usare la calcolatrice"), mark as NOT valid
-- If clearly a sub-question continuation, mark as fragment
+KNOWLEDGE ITEM (the ONE core skill being tested):
+- Ask: "If a student fails this exercise, what specific skill are they missing?"
+- Ask: "What would this exercise be called in a study guide?"
+- Name the CONCEPT being tested, not the task performed
+- Think: "What textbook chapter covers this?"
+- Name should make sense outside this exercise context
+- snake_case, e.g., "matrix_multiplication", "contract_formation_elements", "differential_diagnosis"
+- If multiple concepts, pick the primary one
 
-KNOWLEDGE ITEM (CRITICAL - the ONE core skill being tested):
-Ask: "If a student fails this exercise, what specific skill are they missing?"
-Ask: "What would this exercise be called in a study guide?"
-
-LEARNING APPROACH (determines how student will study this):
-- procedural = exercise asks to APPLY steps/calculate/solve/design/build
-- conceptual = exercise asks to EXPLAIN/compare/reason why/describe differences
-- factual = exercise asks to RECALL specific facts/definitions/formulas
-- analytical = exercise asks to ANALYZE/evaluate/critique/prove
-
-NAMING:
-- Name the CONCEPT being tested, not the TASK being performed
-- Ask: "What would a textbook chapter about this be titled?"
-- The name should make sense outside this exercise context
-- If multiple concepts are tested, pick the primary one
+LEARNING APPROACH:
+- procedural = APPLY steps/calculate/solve/design
+- conceptual = EXPLAIN/compare/reason why
+- factual = RECALL facts/definitions/formulas
+- analytical = ANALYZE/evaluate/critique/prove
 
 CONTEXT EXCLUSION:
 - Extract ONLY course concepts, NOT word problem scenarios
@@ -289,52 +254,6 @@ Respond ONLY with valid JSON.
 """
 
         return base_prompt
-
-    def _build_context_section(self, existing_context: Dict[str, Any]) -> str:
-        """Build the context section for the prompt with existing entities.
-
-        Args:
-            existing_context: Dict with procedures, concepts lists
-
-        Returns:
-            Formatted context string for the prompt
-        """
-        sections = []
-
-        # Add existing procedures
-        procedures = existing_context.get("procedures", [])
-        if procedures:
-            proc_lines = []
-            for p in procedures[:30]:  # Limit to avoid prompt bloat
-                name = p.get("name", p) if isinstance(p, dict) else p
-                ptype = p.get("type", "unknown") if isinstance(p, dict) else "unknown"
-                proc_lines.append(f"  - {name} (type: {ptype})")
-            sections.append(f"""
-EXISTING PROCEDURES (PREFER these if exercise uses same method):
-{chr(10).join(proc_lines)}""")
-
-        # Add existing concepts
-        concepts = existing_context.get("concepts", [])
-        if concepts:
-            concept_lines = []
-            for c in concepts[:20]:  # Limit to avoid prompt bloat
-                name = c.get("name", c) if isinstance(c, dict) else c
-                ctype = c.get("type", "unknown") if isinstance(c, dict) else "unknown"
-                concept_lines.append(f"  - {name} (type: {ctype})")
-            sections.append(f"""
-EXISTING CONCEPTS (PREFER these for theory questions):
-{chr(10).join(concept_lines)}""")
-
-        if sections:
-            context_rules = """
-CONTEXT RULES (CRITICAL):
-1. PREFER existing procedure if solving same problem with same method
-2. PREFER existing concept if asking about same theoretical entity
-3. Create NEW procedure only if method is genuinely different
-4. Only reuse existing name if it's a close match, not a broad category"""
-            return "".join(sections) + context_rules
-
-        return ""
 
     def _normalize_knowledge_item_id(self, knowledge_item_name: Optional[str]) -> Optional[str]:
         """Normalize core loop name to ID.
@@ -433,83 +352,47 @@ CONTEXT RULES (CRITICAL):
             return self.language
 
     def merge_exercises(self, exercises: List[Dict[str, Any]], skip_analyzed: bool = False) -> List[Dict[str, Any]]:
-        """Merge exercise fragments into complete exercises.
+        """Analyze exercises (no fragment merging - Smart Split handles that).
 
         Args:
             exercises: List of exercise dicts from database
             skip_analyzed: If True, skip exercises already marked as analyzed
 
         Returns:
-            List of merged exercises
+            List of exercises with analysis results
         """
         if not exercises:
             return []
 
-        merged = []
-        current_merge = None
+        results = []
 
-        for i, exercise in enumerate(exercises):
+        for exercise in exercises:
             # Skip already analyzed exercises if requested
             if skip_analyzed and exercise.get('analyzed'):
-                # If we have a current merge, save it before skipping
-                if current_merge:
-                    merged.append(current_merge)
-                    current_merge = None
                 print(f"[DEBUG] Skipping already analyzed exercise: {exercise['id'][:40]}...")
                 continue
 
             # Analyze exercise
-            previous_text = current_merge["text"] if current_merge else None
-            if i > 0 and not current_merge:
-                previous_text = exercises[i-1].get("text")
-
             analysis = self.analyze_exercise(
                 exercise["text"],
-                "Computer Architecture",  # TODO: get from exercise
-                previous_text
+                exercise.get("course_name", "Unknown Course"),
             )
 
-            # Skip invalid exercises (exam instructions, etc.)
-            if not analysis.is_valid_exercise:
-                print(f"[DEBUG] Skipping invalid exercise: {exercise['id'][:20]}... ({exercise['text'][:60]}...)")
-                continue
+            results.append({
+                **exercise,
+                "merged_from": [exercise["id"]],
+                "analysis": analysis
+            })
 
-            # Should merge with previous?
-            if analysis.should_merge_with_previous and current_merge:
-                # Merge into current
-                current_merge["text"] += "\n\n" + exercise["text"]
-                current_merge["merged_from"].append(exercise["id"])
-                if exercise.get("image_paths"):
-                    if not current_merge.get("image_paths"):
-                        current_merge["image_paths"] = []
-                    current_merge["image_paths"].extend(exercise["image_paths"])
-            else:
-                # Save previous merge if exists
-                if current_merge:
-                    merged.append(current_merge)
-
-                # Start new exercise (or merge)
-                current_merge = {
-                    **exercise,
-                    "merged_from": [exercise["id"]],
-                    "analysis": analysis
-                }
-
-        # Don't forget last one
-        if current_merge:
-            merged.append(current_merge)
-
-        return merged
+        return results
 
     def _analyze_exercise_with_retry(self, exercise_text: str, course_name: str,
-                                     previous_exercise: Optional[str] = None,
                                      max_retries: int = 2) -> AnalysisResult:
         """Analyze exercise with retry logic for failed API calls.
 
         Args:
             exercise_text: Exercise text
             course_name: Course name for context
-            previous_exercise: Previous exercise text (for merge detection)
             max_retries: Maximum number of retries on failure
 
         Returns:
@@ -529,7 +412,7 @@ CONTEXT RULES (CRITICAL):
         last_error = None
         for attempt in range(max_retries + 1):
             try:
-                result = self.analyze_exercise(exercise_text, course_name, previous_exercise)
+                result = self.analyze_exercise(exercise_text, course_name)
                 # Check if analysis was successful
                 if result.confidence > 0.0 or result.topic is not None:
                     # Add to procedure cache for future use (Option 3)
@@ -562,14 +445,12 @@ CONTEXT RULES (CRITICAL):
         return self._default_analysis_result()
 
     async def _analyze_exercise_with_retry_async(self, exercise_text: str, course_name: str,
-                                                  previous_exercise: Optional[str] = None,
                                                   max_retries: int = 2) -> AnalysisResult:
         """Analyze exercise asynchronously with retry logic for failed API calls.
 
         Args:
             exercise_text: Exercise text
             course_name: Course name for context
-            previous_exercise: Previous exercise text (for merge detection)
             max_retries: Maximum number of retries on failure
 
         Returns:
@@ -592,7 +473,7 @@ CONTEXT RULES (CRITICAL):
             try:
                 # Build prompt
                 prompt = self._build_analysis_prompt(
-                    exercise_text, course_name, previous_exercise
+                    exercise_text, course_name
                 )
 
                 # Call LLM asynchronously
@@ -724,10 +605,7 @@ CONTEXT RULES (CRITICAL):
                                  batch_size: Optional[int] = None,
                                  show_progress: bool = True,
                                  skip_analyzed: bool = False) -> List[Dict[str, Any]]:
-        """Merge exercise fragments using parallel batch processing.
-
-        This method analyzes exercises in parallel batches to improve performance.
-        Each batch is processed concurrently, with retry logic for failed exercises.
+        """Analyze exercises in parallel batches (no fragment merging - Smart Split handles that).
 
         Args:
             exercises: List of exercise dicts from database
@@ -736,7 +614,7 @@ CONTEXT RULES (CRITICAL):
             skip_analyzed: If True, skip exercises already marked as analyzed
 
         Returns:
-            List of merged exercises
+            List of exercises with analysis results
         """
         if not exercises:
             return []
@@ -751,7 +629,7 @@ CONTEXT RULES (CRITICAL):
         analysis_results = {}
 
         # Process in batches
-        def analyze_single(index: int, exercise: Dict[str, Any], prev_text: Optional[str]) -> tuple:
+        def analyze_single(index: int, exercise: Dict[str, Any]) -> tuple:
             """Analyze a single exercise and return (index, analysis, error)."""
             try:
                 # Skip already analyzed if requested
@@ -760,8 +638,7 @@ CONTEXT RULES (CRITICAL):
 
                 analysis = self._analyze_exercise_with_retry(
                     exercise["text"],
-                    "Computer Architecture",  # TODO: get from exercise
-                    prev_text
+                    exercise.get("course_name", "Unknown Course"),
                 )
                 return (index, analysis, None)
             except Exception as e:
@@ -785,13 +662,8 @@ CONTEXT RULES (CRITICAL):
             with ThreadPoolExecutor(max_workers=batch_size) as executor:
                 futures = {}
 
-                for i, (idx, exercise) in enumerate(zip(batch_indices, batch)):
-                    # Determine previous exercise text for merge detection
-                    prev_text = None
-                    if idx > 0:
-                        prev_text = exercises[idx - 1].get("text")
-
-                    future = executor.submit(analyze_single, idx, exercise, prev_text)
+                for idx, exercise in zip(batch_indices, batch):
+                    future = executor.submit(analyze_single, idx, exercise)
                     futures[future] = idx
 
                 # Collect results as they complete
@@ -823,63 +695,27 @@ CONTEXT RULES (CRITICAL):
         print(f"  Failed: {failed_count} exercises")
         print(f"  Rate: {processed/elapsed_time:.1f} exercises/second")
 
-        # Now merge exercises sequentially based on analysis results
-        print(f"[INFO] Merging exercise fragments...")
-        merged = []
-        current_merge = None
-
+        # Build results list (each exercise is standalone - no fragment merging)
+        results = []
         for i, exercise in enumerate(exercises):
-            # Check if skipped
             if i not in analysis_results:
-                if current_merge:
-                    merged.append(current_merge)
-                    current_merge = None
                 continue
 
-            analysis = analysis_results[i]
+            results.append({
+                **exercise,
+                "merged_from": [exercise["id"]],
+                "analysis": analysis_results[i]
+            })
 
-            # Skip invalid exercises
-            if not analysis.is_valid_exercise:
-                print(f"[DEBUG] Skipping invalid exercise: {exercise['id'][:20]}... ({exercise['text'][:60]}...)")
-                continue
+        print(f"[INFO] Analyzed {len(results)} exercises")
 
-            # Should merge with previous?
-            if analysis.should_merge_with_previous and current_merge:
-                # Merge into current
-                current_merge["text"] += "\n\n" + exercise["text"]
-                current_merge["merged_from"].append(exercise["id"])
-                if exercise.get("image_paths"):
-                    if not current_merge.get("image_paths"):
-                        current_merge["image_paths"] = []
-                    current_merge["image_paths"].extend(exercise["image_paths"])
-            else:
-                # Save previous merge if exists
-                if current_merge:
-                    merged.append(current_merge)
-
-                # Start new exercise
-                current_merge = {
-                    **exercise,
-                    "merged_from": [exercise["id"]],
-                    "analysis": analysis
-                }
-
-        # Don't forget last one
-        if current_merge:
-            merged.append(current_merge)
-
-        print(f"[INFO] Merged {len(exercises)} fragments → {len(merged)} complete exercises")
-
-        return merged
+        return results
 
     async def merge_exercises_async(self, exercises: List[Dict[str, Any]],
                                     batch_size: Optional[int] = None,
                                     show_progress: bool = True,
                                     skip_analyzed: bool = False) -> List[Dict[str, Any]]:
-        """Merge exercise fragments using async batch processing.
-
-        This method analyzes exercises in async batches to improve performance.
-        Each batch is processed concurrently using asyncio.gather(), with retry logic for failed exercises.
+        """Analyze exercises using async batch processing (no fragment merging - Smart Split handles that).
 
         Args:
             exercises: List of exercise dicts from database
@@ -888,7 +724,7 @@ CONTEXT RULES (CRITICAL):
             skip_analyzed: If True, skip exercises already marked as analyzed
 
         Returns:
-            List of merged exercises
+            List of exercises with analysis results
         """
         if not exercises:
             return []
@@ -903,7 +739,7 @@ CONTEXT RULES (CRITICAL):
         analysis_results = {}
 
         # Process in batches
-        async def analyze_single(index: int, exercise: Dict[str, Any], prev_text: Optional[str]) -> tuple:
+        async def analyze_single(index: int, exercise: Dict[str, Any]) -> tuple:
             """Analyze a single exercise and return (index, analysis, error)."""
             try:
                 # Skip already analyzed if requested
@@ -912,8 +748,7 @@ CONTEXT RULES (CRITICAL):
 
                 analysis = await self._analyze_exercise_with_retry_async(
                     exercise["text"],
-                    "Computer Architecture",  # TODO: get from exercise
-                    prev_text
+                    exercise.get("course_name", "Unknown Course"),
                 )
                 return (index, analysis, None)
             except Exception as e:
@@ -936,12 +771,7 @@ CONTEXT RULES (CRITICAL):
             # Prepare analysis tasks for this batch
             tasks = []
             for idx, exercise in zip(batch_indices, batch):
-                # Determine previous exercise text for merge detection
-                prev_text = None
-                if idx > 0:
-                    prev_text = exercises[idx - 1].get("text")
-
-                task = analyze_single(idx, exercise, prev_text)
+                task = analyze_single(idx, exercise)
                 tasks.append(task)
 
             # Run all tasks concurrently
@@ -983,54 +813,21 @@ CONTEXT RULES (CRITICAL):
         print(f"  Failed: {failed_count} exercises")
         print(f"  Rate: {processed/elapsed_time:.1f} exercises/second")
 
-        # Now merge exercises sequentially based on analysis results
-        print(f"[INFO] Merging exercise fragments...")
-        merged = []
-        current_merge = None
-
+        # Build results list (each exercise is standalone - no fragment merging)
+        results_list = []
         for i, exercise in enumerate(exercises):
-            # Check if skipped
             if i not in analysis_results:
-                if current_merge:
-                    merged.append(current_merge)
-                    current_merge = None
                 continue
 
-            analysis = analysis_results[i]
+            results_list.append({
+                **exercise,
+                "merged_from": [exercise["id"]],
+                "analysis": analysis_results[i]
+            })
 
-            # Skip invalid exercises
-            if not analysis.is_valid_exercise:
-                print(f"[DEBUG] Skipping invalid exercise: {exercise['id'][:20]}... ({exercise['text'][:60]}...)")
-                continue
+        print(f"[INFO] Analyzed {len(results_list)} exercises")
 
-            # Should merge with previous?
-            if analysis.should_merge_with_previous and current_merge:
-                # Merge into current
-                current_merge["text"] += "\n\n" + exercise["text"]
-                current_merge["merged_from"].append(exercise["id"])
-                if exercise.get("image_paths"):
-                    if not current_merge.get("image_paths"):
-                        current_merge["image_paths"] = []
-                    current_merge["image_paths"].extend(exercise["image_paths"])
-            else:
-                # Save previous merge if exists
-                if current_merge:
-                    merged.append(current_merge)
-
-                # Start new exercise
-                current_merge = {
-                    **exercise,
-                    "merged_from": [exercise["id"]],
-                    "analysis": analysis
-                }
-
-        # Don't forget last one
-        if current_merge:
-            merged.append(current_merge)
-
-        print(f"[INFO] Merged {len(exercises)} fragments → {len(merged)} complete exercises")
-
-        return merged
+        return results_list
 
     def discover_knowledge_items(self, course_code: str,
                             batch_size: int = 10,
