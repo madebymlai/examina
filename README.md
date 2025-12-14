@@ -6,10 +6,10 @@ AI-powered exam preparation that learns from your course materials.
 
 Upload past exams, homework, or problem sets. Examina analyzes them to:
 
-- **Discover patterns** - Identifies recurring problem types and solving procedures
-- **Build knowledge** - Extracts exercises, topics, and step-by-step solutions
+- **Discover knowledge** - Identifies concepts, procedures, theorems, and formulas
+- **Smart merging** - Groups equivalent items across PDFs using AI reasoning
 - **Teach adaptively** - AI tutoring that adjusts to your mastery level
-- **Track progress** - Spaced repetition with mastery cascade updates
+- **Track progress** - Spaced repetition with SM2 algorithm
 - **Generate practice** - Quizzes that prioritize weak areas
 
 ## Quick Start
@@ -38,11 +38,11 @@ python3 cli.py add-course --code ADE --name "Computer Architecture"
 # 2. Upload materials (exams, homework, problem sets)
 python3 cli.py ingest --course ADE --zip materials.zip
 
-# 3. Analyze (discovers topics & procedures)
+# 3. Analyze (discovers knowledge items)
 python3 cli.py analyze --course ADE
 
-# 4. Learn a procedure
-python3 cli.py learn --course ADE --loop "FSM Design"
+# 4. Learn a topic
+python3 cli.py learn --course ADE --item "matrix_diagonalization"
 
 # 5. Take adaptive quiz
 python3 cli.py quiz --course ADE --questions 10 --adaptive
@@ -53,12 +53,11 @@ python3 cli.py progress --course ADE
 
 ## What Can You Upload?
 
-Any PDF with numbered exercises:
+Any PDF with numbered exercises (max 20 pages):
 - Past exams (with or without solutions)
 - Homework assignments
 - Practice problem sets
 - Exercise collections
-- Lecture notes with worked examples
 
 **Works with any language** - Italian, English, Spanish, French, etc.
 
@@ -66,38 +65,34 @@ Any PDF with numbered exercises:
 
 ### Analysis
 - Language-agnostic exercise detection
-- Multi-step procedure extraction
-- Theory and proof support
-- Automatic topic discovery
+- Smart sub-question splitting
+- Knowledge item extraction (procedures, theorems, definitions, formulas)
+- DeepSeek reasoner for accurate item grouping
 
 ### Learning
 - Adaptive depth based on mastery
-- Prerequisite enforcement
+- Learning approach detection (procedural, conceptual, factual, analytical)
 - Real-time feedback
-- Concept map visualization
 
 ### Progress
 - SM-2 spaced repetition
-- Mastery cascade (exercise → topic → course)
+- Mastery tracking per knowledge item
 - Weak area detection
 - Study suggestions
 
 ### Performance
 - Provider routing (cheapest per task type)
-- Pattern caching (100% hit rate on re-analysis)
+- Response caching (faster re-analysis)
 - Async analysis pipeline
-- 26+ exercises/second with cache
 
 ## LLM Providers
 
-| Provider  | Best For                   | Cost                |
-|-----------|----------------------------|---------------------|
-| DeepSeek  | Bulk analysis, web apps    | $0.14/M tokens      |
+| Provider  | Best For                   | Model |
+|-----------|----------------------------|-------|
+| DeepSeek  | Analysis, grouping         | deepseek-chat, deepseek-reasoner |
 | Groq      | CLI quizzes (30 RPM limit) | Free tier available |
-| Anthropic | Premium explanations       | Higher cost         |
+| Anthropic | Premium explanations       | Claude |
 | Ollama    | Local, private             | Free (requires GPU) |
-
-Set with `--profile free|pro|local` or `--provider <name>`.
 
 ## Web Version
 
@@ -105,7 +100,7 @@ For multi-user web deployment, see [examina-cloud](https://github.com/madebymlai
 
 ## Privacy
 
-Your materials stay local. Content is only sent to LLM providers for generating explanations. We don't train on your data.
+Your materials stay local. Content is only sent to LLM providers for analysis. We don't train on your data.
 
 ## License
 
