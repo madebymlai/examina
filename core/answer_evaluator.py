@@ -63,7 +63,7 @@ class RecallEvaluationResult:
 
 
 RECALL_EVALUATION_PROMPT = """
-Compare this student's explanation of a concept to the reference material.
+Compare this student's explanation of a concept to the **reference material**.
 
 Concept: {concept_name}
 Reference Content:
@@ -73,14 +73,14 @@ Student's Explanation:
 {student_explanation}
 
 Evaluate their recall and provide a JSON response with:
-- "recall_score": float from 0.0 to 1.0 (how complete and accurate their recall was)
-- "correct_points": list of key points they correctly explained
-- "missed_points": list of important points they did not mention
-- "misconceptions": list of any incorrect statements (empty if none)
-- "feedback": 2-3 sentence summary of their recall quality
+- **"recall_score"**: float from 0.0 to 1.0
+- **"correct_points"**: list of key points they **correctly explained**
+- **"missed_points"**: list of important points they **did not mention**
+- **"misconceptions"**: list of any **incorrect statements** (empty if none)
+- **"feedback"**: 2-3 sentence summary
 
-Be encouraging but honest. Focus on key concepts, not exact wording.
-Respond ONLY with valid JSON.
+Be **encouraging but honest**. Focus on **key concepts**, not exact wording.
+Respond **ONLY** with valid JSON.
 """
 
 
@@ -247,11 +247,11 @@ Expected Solution: {solution_text}
 Student Answer: {student_answer}
 
 Provide a JSON response with:
-- "is_correct": true/false (true if answer is substantially correct)
-- "score": 0.0 to 1.0 (0 = completely wrong, 1 = perfect)
-- "feedback": brief feedback explaining the evaluation
+- **"is_correct"**: true/false (true if answer is **substantially correct**)
+- **"score"**: 0.0 to 1.0 (0 = completely wrong, 1 = perfect)
+- **"feedback"**: brief feedback explaining the evaluation
 
-Respond ONLY with valid JSON, no other text."""
+Respond **ONLY** with valid JSON, no other text."""
 
         try:
             response = self._llm.generate(prompt)
@@ -293,11 +293,11 @@ Question: {question}
 Student Answer: {student_answer}
 {hint_instruction}
 
-Provide helpful, encouraging feedback. If the answer is correct, acknowledge it. \
-If incorrect, explain what's missing or wrong without giving away the full solution \
+Provide **helpful, encouraging** feedback. If the answer is **correct**, acknowledge it.
+If **incorrect**, explain what's missing or wrong **without giving away the full solution**
 unless hints are requested.
 
-Keep your response concise (2-4 sentences)."""
+Keep your response **concise** (2-4 sentences)."""
 
         try:
             feedback = self._llm.generate(prompt)

@@ -251,17 +251,19 @@ def _detect_exercises(
     Returns:
         DetectionResult with exercise markers and has_solutions flag, None if detection fails
     """
-    prompt = """Identify MAIN EXERCISES in this exam document.
+    prompt = """Identify **MAIN EXERCISES** in this exam document.
 
-Main exercises are TOP-LEVEL sections (like "Exercise 1", "Esercizio 1", "1)", "Problem 1").
-NOT main exercises: sub-questions like "1a)", "a)", "i)", "(a)"
-IGNORE solution sections - only identify QUESTIONS.
+Main exercises are **TOP-LEVEL** sections:
+- **Marked**: "Exercise 1", "Problem 1", "1)"
+- **Unmarked**: distinct question paragraphs separated by blank lines
+
+**IGNORE** solution sections - only identify **QUESTIONS**.
 
 DOCUMENT:
 {text}
 
-Return the UNIQUE TEXT that starts each main exercise.
-Copy EXACT text verbatim from the document. Include the exercise marker/number.
+Return the **UNIQUE TEXT** that starts each main exercise.
+Copy **EXACT** text **verbatim** from the document.
 
 Output valid JSON:
 {{"exercises": ["first exercise start text...", "second exercise start text..."], "has_solutions": true/false}}
@@ -360,21 +362,20 @@ async def _analyze_exercise(
         Tuple of (exercise_num, ExerciseAnalysis)
     """
     prompt = f"""Identify for this exercise:
-1. end_marker: LAST 40-60 characters of the ENTIRE exercise question
-2. has_sub_questions: true/false
+1. **end_marker**: LAST 40-60 characters of the **ENTIRE** exercise question
+2. **has_sub_questions**: true/false
 
-CRITICAL:
-- end_marker should be at the END of all question content (INCLUDING any sub-questions), BEFORE any:
+**CRITICAL**:
+- end_marker should be at the **END** of all question content (INCLUDING sub-questions), **BEFORE** any:
   - Form fields or blank lines for answers
   - Solutions or answer sections
   - Page headers/footers
-  - Exam instructions
   - Junk text between exercises
 
-- has_sub_questions = true if exercise contains SEPARATE tasks requiring SEPARATE answers
-  - Can be marked: a), b), c), 1., 2., 3., i), ii), -, •, etc.
+- has_sub_questions = **true** if exercise contains **SEPARATE tasks** requiring **SEPARATE answers**
+  - Can be marked: a), b), c), 1., 2., i), ii), -, •
   - Can be unmarked: separate paragraphs asking different things
-- has_sub_questions = false if exercise contains only ONE task (with its data/context)
+- has_sub_questions = **false** if exercise contains only **ONE task** (with its data/context)
 
 EXERCISE:
 \"\"\"
@@ -472,17 +473,17 @@ async def _get_sub_start_markers_for_exercise(
     llm_manager: "LLMManager",
 ) -> Tuple[str, Optional[List[str]]]:
     """Call 3: Get sub-question start markers for one exercise."""
-    prompt = f"""Identify sub-questions in this exercise.
+    prompt = f"""Identify **sub-questions** in this exercise.
 
-Sub-questions are SEPARATE TASKS requiring SEPARATE ANSWERS:
+Sub-questions are **SEPARATE TASKS** requiring **SEPARATE ANSWERS**:
 - Can be marked: a), b), c), 1., 2., 3., i), ii), -, •, etc.
 - Can be unmarked: separate paragraphs asking different things
 
 Key distinction:
-- Sub-question: asks student to DO something (produce answer, calculation, drawing)
-- NOT a sub-question: GIVES INFORMATION to student
+- Sub-question: asks student to **DO** something (produce answer, calculation, drawing)
+- **NOT** a sub-question: **GIVES INFORMATION** to student
 
-IMPORTANT: Return the EXACT first 10-15 words as they appear (copy verbatim, including markers).
+**IMPORTANT**: Return the **EXACT** first 10-15 words as they appear (copy **verbatim**, including markers).
 
 EXERCISE:
 \"\"\"
@@ -548,8 +549,8 @@ async def _get_sub_end_marker_for_sub(
     llm_manager: "LLMManager",
 ) -> Tuple[str, Optional[str]]:
     """Call 4: Get end marker for one sub-question."""
-    prompt = f"""Identify where this sub-question ENDS.
-Return the last 30-50 characters of the actual question (before any trailing junk like page numbers, form fields, next sub-question markers).
+    prompt = f"""Identify where this sub-question **ENDS**.
+Return the **last 30-50 characters** of the actual question (**BEFORE** any trailing junk like page numbers, form fields, next sub-question markers).
 
 SUB-QUESTION:
 \"\"\"
@@ -559,7 +560,7 @@ SUB-QUESTION:
 Return JSON:
 {{"end_marker": "last 30-50 chars verbatim"}}
 
-IMPORTANT: end_marker must be EXACT text, used to find where to trim."""
+**IMPORTANT**: end_marker must be **EXACT** text, used to find where to trim."""
 
     try:
         def call_llm():
@@ -619,11 +620,11 @@ async def _get_context_summary_for_exercise(
     """Call 5: Get context summary for one exercise (parent or standalone)."""
     if has_sub_questions:
         # Parent exercise: extract shared context for sub-questions
-        prompt = f"""Extract the shared context that sub-questions need from this parent exercise.
+        prompt = f"""Extract the **shared context** that sub-questions need from this parent exercise.
 
-Good context: data values, parameters, scenario setup, definitions that sub-questions reference.
-Return null if sub-questions are independent and don't need shared info.
-IMPORTANT: Return context_summary in ENGLISH, even if source is another language.
+**Good context**: data values, parameters, scenario setup, definitions that sub-questions reference.
+Return **null** if sub-questions are **independent** and don't need shared info.
+**IMPORTANT**: Return context_summary in **ENGLISH**, even if source is another language.
 
 PARENT EXERCISE:
 \"\"\"
@@ -637,12 +638,12 @@ Return JSON:
         prompt = f"""Summarize this exercise for context.
 
 Focus on:
-- The core skill/concept being tested
-- Key data values, parameters, or given information
-- What the student must do (calculate, explain, design, compare, etc.)
+- The **core skill/concept** being tested
+- Key **data values**, **parameters**, or given information
+- What the student must **DO** (calculate, explain, design, compare)
 
-Keep it concise - this summary helps understand what the exercise asks.
-IMPORTANT: Return summary in ENGLISH, even if source is another language.
+Keep it **concise**.
+**IMPORTANT**: Return summary in **ENGLISH**, even if source is another language.
 
 EXERCISE:
 \"\"\"

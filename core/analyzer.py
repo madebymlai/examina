@@ -200,7 +200,7 @@ class ExerciseAnalyzer:
         """
         base_prompt = f"""You are analyzing exam exercises for the course: {course_name}.
 
-Extract the knowledge item (core skill/concept) being tested.
+Extract the **knowledge item** (core skill/concept) being tested.
 
 EXERCISE TEXT:
 ```
@@ -245,23 +245,23 @@ Respond in JSON format:
   }}
 }}
 
-KNOWLEDGE ITEM (the ONE core skill being tested):
-- Ask: "If a student fails this exercise, what specific skill are they missing?"
+**KNOWLEDGE ITEM** (the **ONE** core skill being tested):
+- Ask: "If a student fails this exercise, what **specific skill** are they missing?"
 - Ask: "What would this exercise be called in a study guide?"
-- Name the CONCEPT being tested, not the task performed
+- Name the **CONCEPT** being tested, **not the task performed**
 - Think: "What textbook chapter covers this?"
 - Name should make sense outside this exercise context
-- snake_case, e.g., "matrix_multiplication", "contract_formation_elements", "differential_diagnosis"
-- If multiple concepts, pick the primary one
+- **snake_case**, e.g., "matrix_multiplication"
+- If **multiple concepts**, pick the **primary one**
 
-LEARNING APPROACH:
-- procedural = APPLY steps/calculate/solve/design
-- conceptual = EXPLAIN/compare/reason why
-- factual = RECALL facts/definitions/formulas
-- analytical = ANALYZE/evaluate/critique/prove
+**LEARNING APPROACH**:
+- **procedural** = APPLY steps/calculate/solve/design
+- **conceptual** = EXPLAIN/compare/reason why
+- **factual** = RECALL facts/definitions/formulas
+- **analytical** = ANALYZE/evaluate/critique/prove
 
-CONTEXT EXCLUSION:
-- Extract ONLY course concepts, NOT word problem scenarios
+**CONTEXT EXCLUSION**:
+- Extract **ONLY** course concepts, **NOT** word problem scenarios
 - Test: "Does this have a formal definition/procedure in the course, or just scenery?"
 
 Respond ONLY with valid JSON.
