@@ -2,6 +2,7 @@
 Post-processor for knowledge item merging.
 
 Groups equivalent knowledge items by skill and picks canonical names.
+Uses description-based approach for better accuracy.
 """
 import json
 import logging
@@ -9,6 +10,191 @@ import logging
 from models.llm_manager import LLMManager
 
 logger = logging.getLogger(__name__)
+
+
+def generate_item_description(
+    exercises: list[dict],
+    llm: LLMManager,
+) -> str:
+    """
+    Generate a skill description from exercises.
+
+    Uses exercise text to create a concise description of what skill is tested.
+    Sub-questions use their text only (no parent context to avoid over-grouping).
+
+    Args:
+        exercises: List of exercise dicts with keys: text, is_sub, context
+        llm: LLMManager instance
+
+    Returns:
+        Description string (falls back to first exercise text on error)
+    """
+    if not exercises:
+        return ""
+
+    # Build text from exercises (cap at 6)
+    exercises_text = []
+    for ex in exercises[:6]:
+        if ex.get("is_sub"):
+            exercises_text.append(ex.get("text", ""))
+        else:
+            exercises_text.append(ex.get("context", "") or ex.get("text", ""))
+
+    exercises_text = [t for t in exercises_text if t]
+    if not exercises_text:
+        return ""
+
+    is_single = len(exercises_text) == 1
+    exercise_word = "exercise" if is_single else "exercises"
+    this_these = "this" if is_single else "these"
+
+    prompt = f"""Describe the skill tested by {this_these} {exercise_word}.
+
+{"Exercise" if is_single else "Exercises"}:
+{chr(10).join(f"- {t}" for t in exercises_text)}
+
+Write a description that:
+- Includes the specific concept tested
+- Excludes facts, data, scenarios, or question format
+- Would fit any exercise testing this specific concept
+
+**Be concise.**
+**NO preambles about skill or exercise.**
+
+Return JSON: {{"description": "..."}}"""
+
+    try:
+        response = llm.generate(prompt=prompt, temperature=0.0, json_mode=True)
+        if response and response.text:
+            result = json.loads(response.text)
+            return result.get("description", exercises_text[0][:100])
+        return exercises_text[0][:100]
+    except Exception as e:
+        logger.warning(f"Description generation failed: {e}")
+        return exercises_text[0][:100] if exercises_text else ""
+
+
+def group_items(
+    items: list[dict],
+    llm: LLMManager,
+) -> list[list[int]]:
+    """
+    Group items that describe the same task using anonymous IDs.
+
+    Uses descriptions only - names are hidden from LLM to prevent bias.
+    Returns indices into the original items list.
+
+    Args:
+        items: List of dicts with key: description
+        llm: LLMManager instance
+
+    Returns:
+        List of index groups, e.g., [[0, 2], [1, 3, 4]]
+    """
+    if len(items) < 2:
+        return []
+
+    # Check if we have descriptions
+    has_descriptions = any(item.get("description") for item in items)
+    if not has_descriptions:
+        logger.info("No descriptions provided, skipping grouping")
+        return []
+
+    # Build prompt with anonymous IDs - LLM never sees names
+    items_text = [f"- Item {i+1}: {item['description']}" for i, item in enumerate(items)]
+
+    prompt = f"""Which describe the same task?
+
+{chr(10).join(items_text)}
+
+Same task = **SAME** topic AND **SAME** action.
+Different topics are NEVER the same task, even with same action.
+
+Return JSON: {{"groups": [[1, 2]]}}
+Return {{"groups": []}} if all different."""
+
+    try:
+        logger.info(f"Grouping {len(items)} items by description")
+        response = llm.generate(prompt=prompt, temperature=0.0, json_mode=True)
+
+        if not response or not response.text:
+            logger.warning("Empty response from grouping LLM call")
+            return []
+
+        result = json.loads(response.text)
+
+        # Handle {"groups": [...]} format
+        groups = result.get("groups", [])
+        if not groups:
+            logger.info("No groups detected")
+            return []
+
+        # Convert 1-indexed to 0-indexed
+        result_groups: list[list[int]] = []
+        for group in groups:
+            if not isinstance(group, list) or len(group) < 2:
+                continue
+            # Convert to 0-indexed and validate
+            indices = [idx - 1 for idx in group if isinstance(idx, int) and 0 < idx <= len(items)]
+            if len(indices) >= 2:
+                result_groups.append(indices)
+                logger.info(f"Group: items {indices}")
+
+        return result_groups
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse grouping response: {e}")
+        return []
+    except Exception as e:
+        logger.warning(f"Grouping LLM call failed: {e}")
+        return []
+
+
+def regenerate_description(
+    descriptions: list[str],
+    llm: LLMManager,
+) -> str:
+    """
+    Synthesize a unified description from multiple descriptions.
+
+    Used after merging to create one description that captures all merged items.
+
+    Args:
+        descriptions: List of description strings from merged items
+        llm: LLMManager instance
+
+    Returns:
+        Unified description (falls back to first on error)
+    """
+    if not descriptions:
+        return ""
+    if len(descriptions) == 1:
+        return descriptions[0]
+
+    # Filter empty descriptions
+    descriptions = [d for d in descriptions if d]
+    if not descriptions:
+        return ""
+    if len(descriptions) == 1:
+        return descriptions[0]
+
+    prompt = f"""Synthesize one unified description from these:
+
+{chr(10).join(f"- {d}" for d in descriptions)}
+
+**Be concise.** Return the best unified description.
+
+Return JSON: {{"description": "..."}}"""
+
+    try:
+        response = llm.generate(prompt=prompt, temperature=0.0, json_mode=True)
+        if response and response.text:
+            result = json.loads(response.text)
+            return result.get("description", descriptions[0])
+        return descriptions[0]
+    except Exception as e:
+        logger.warning(f"Description regeneration failed: {e}")
+        return descriptions[0]
 
 
 def group_items_by_skill(
