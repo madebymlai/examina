@@ -106,8 +106,14 @@ def group_items(
 
 {chr(10).join(items_text)}
 
-Same task = **SAME** topic AND **SAME** action.
-Different topics are NEVER the same task, even with same action.
+Group only if: **SAME** topic AND **SAME** task type.
+
+Topic = the specific concept being tested
+- Related concepts are still different topics
+
+Theoretical ≠ Practical (different task types)
+- Theoretical: define, explain, state, describe
+- Practical: compute, calculate, find, apply, solve
 
 Return JSON: {{"groups": [[1, 2]]}}
 Return {{"groups": []}} if all different."""
