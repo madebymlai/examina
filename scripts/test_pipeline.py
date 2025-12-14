@@ -5,12 +5,18 @@ Pipeline Test Suite for examina-core.
 Tests parsing, exercise splitting, and knowledge item extraction
 across diverse exam PDFs from multiple academic domains.
 
+Supports two processing modes (matching cloud tier behavior):
+- Parallel (default, Pro-like): Each PDF analyzed independently, cross-batch merge at end
+- Sequential (--sequential, Free-like): Each PDF sees previous items, inline merge
+
 Usage:
     python test_pipeline.py --smoke              # 1 PDF per course (~2 min)
     python test_pipeline.py --course ADE         # All PDFs in one course
+    python test_pipeline.py --course ADE --full  # Full pipeline with cross-batch merge
     python test_pipeline.py --all                # All 43 PDFs (~15-30 min)
     python test_pipeline.py --pdf path/to.pdf    # Single PDF
     python test_pipeline.py --golden             # Regression tests with exact counts
+    python test_pipeline.py --sequential         # Free-tier mode (each PDF sees previous)
     python test_pipeline.py --help               # Full usage guide
 """
 
@@ -30,75 +36,10 @@ import yaml
 # Add examina to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.pdf_processor import PDFProcessor, PDFContent
-from core.exercise_splitter import ExerciseSplitter, Exercise
-from core.analyzer import ExerciseAnalyzer
-from core.merger import group_items_by_skill, get_canonical_name
-
-
-def generate_item_description(name: str, exercises: list[dict], llm) -> str:
-    """Generate skill-only description from exercises."""
-    if not exercises:
-        return ""
-
-    exercises_text = []
-    for ex in exercises[:6]:
-        if ex.get("is_sub"):
-            exercises_text.append(ex.get("text", ""))
-        else:
-            exercises_text.append(ex.get("context", "") or ex.get("text", ""))
-
-    is_single = len(exercises_text) == 1
-    exercise_word = "exercise" if is_single else "exercises"
-    this_these = "this" if is_single else "these"
-
-    prompt = f"""Describe the skill tested by {this_these} {exercise_word}.
-
-{"Exercise" if is_single else "Exercises"}:
-{chr(10).join(f"- {t}" for t in exercises_text)}
-
-Write a description that:
-- Includes the specific concept tested
-- Excludes facts, data, scenarios, or question format
-- Would fit any exercise testing this specific concept
-
-**Be concise.**
-**NO preambles about skill or exercise.**
-
-Return JSON: {{"description": "..."}}"""
-
-    try:
-        response = llm.generate(prompt=prompt, temperature=0.0, json_mode=True)
-        result = json.loads(response.text)
-        return result.get("description", exercises_text[0][:100] if exercises_text else "")
-    except Exception:
-        return exercises_text[0][:100] if exercises_text else ""
-
-
-def group_items_by_description(items: list[dict], llm) -> list[list[int]]:
-    """Group items by skill using descriptions only (anonymous IDs)."""
-    if len(items) < 2:
-        return []
-
-    items_text = [f"- Item {i+1}: {item['description']}" for i, item in enumerate(items)]
-
-    prompt = f"""Which describe the same task?
-
-{chr(10).join(items_text)}
-
-Same task = **SAME** topic AND **SAME** action.
-Different topics are NEVER the same task, even with same action.
-
-Return JSON: {{"groups": [[1, 2]]}}
-Return {{"groups": []}} if all different."""
-
-    try:
-        response = llm.generate(prompt=prompt, temperature=0.0, json_mode=True)
-        result = json.loads(response.text)
-        groups = result.get("groups", [])
-        return [[idx - 1 for idx in group] for group in groups if len(group) >= 2]
-    except Exception:
-        return []
+from core.analyzer import ExerciseAnalyzer, generate_item_description
+from core.exercise_splitter import ExerciseSplitter
+from core.merger import get_canonical_name, group_items
+from core.pdf_processor import PDFProcessor
 from models.llm_manager import LLMManager
 
 # =============================================================================
@@ -193,7 +134,8 @@ class TestResult:
     warnings: list = field(default_factory=list)
     duration: float = 0.0
     exercise_details: list = field(default_factory=list)
-    skill_groups: list = field(default_factory=list)  # Merge results
+    skill_groups: list = field(default_factory=list)  # Internal merge results
+    knowledge_items: list = field(default_factory=list)  # KIs for cross-batch merge
 
 
 @dataclass
@@ -206,6 +148,7 @@ class TestSummary:
     warnings: list = field(default_factory=list)
     results: list = field(default_factory=list)
     duration: float = 0.0
+    cross_batch_groups: list = field(default_factory=list)  # Cross-PDF merge results
 
 
 # =============================================================================
@@ -368,8 +311,22 @@ class PipelineTester:
         result.duration += time.time() - start
         return result
 
-    def test_full(self, pdf_path: Path, course_name: str) -> TestResult:
-        """Stage 1-4: Full pipeline including analysis + merge/skill grouping."""
+    def test_full(
+        self,
+        pdf_path: Path,
+        course_name: str,
+        existing_items: list[dict] | None = None,
+    ) -> TestResult:
+        """Stage 1-4: Full pipeline including analysis + internal merge.
+
+        Args:
+            pdf_path: Path to PDF file
+            course_name: Name of course for context
+            existing_items: For sequential mode, items from previous PDFs to merge against
+
+        Returns:
+            TestResult with knowledge_items populated for cross-batch merge
+        """
         result = self.test_analyze(pdf_path, course_name)
         if result.status != "PASS":
             return result
@@ -388,8 +345,6 @@ class PipelineTester:
                     ki_exercises[ki_name] = []
 
                 # Build exercise snippet for merger
-                # Sub-questions: text only (no parent context to avoid bias)
-                # Standalone: context only (summary)
                 if ex.get("is_sub"):
                     snippet = ex.get("text_preview", "")
                 else:
@@ -403,23 +358,26 @@ class PipelineTester:
                     "snippet": snippet,
                 })
 
-            # Build items with descriptions (new approach)
+            # Build items with descriptions
             items = []
             for name, exs in ki_exercises.items():
-                description = generate_item_description(name, exs, self.llm)
+                description = generate_item_description(exs, self.llm)
                 items.append({
+                    "id": len(items),  # Index as ID
                     "name": name,
                     "description": description,
                     "exercises": exs,
+                    "pdf": pdf_path.name,
                 })
 
+            # INTERNAL MERGE: Find duplicates within this PDF
             if len(items) >= 2:
-                # Run skill grouping with descriptions (anonymous IDs)
-                group_indices = group_items_by_description(items, self.llm)
+                group_indices = group_items(items, self.llm)
 
-                # Format skill groups with exercise context
                 for indices in group_indices:
-                    group_items_list = [items[i] for i in indices]
+                    group_items_list = [items[i] for i in indices if i < len(items)]
+                    if len(group_items_list) < 2:
+                        continue
                     group_names = [item["name"] for item in group_items_list]
                     canonical = get_canonical_name(group_names, self.llm)
 
@@ -434,8 +392,42 @@ class PipelineTester:
                     result.skill_groups.append({
                         "canonical": canonical,
                         "members": members,
+                        "type": "internal",
                     })
 
+            # SEQUENTIAL MODE: Merge against existing items from previous PDFs
+            if existing_items and len(items) >= 1:
+                # Combine new items with existing for cross-batch check
+                combined = existing_items + items
+                cross_groups = group_items(combined, self.llm)
+
+                # Filter to groups that span old and new items
+                boundary = len(existing_items)
+                for indices in cross_groups:
+                    has_old = any(i < boundary for i in indices)
+                    has_new = any(i >= boundary for i in indices)
+                    if has_old and has_new:
+                        # This is a cross-batch merge
+                        group_items_list = [combined[i] for i in indices if i < len(combined)]
+                        group_names = [item["name"] for item in group_items_list]
+                        canonical = get_canonical_name(group_names, self.llm)
+
+                        members = []
+                        for item in group_items_list:
+                            members.append({
+                                "name": item["name"],
+                                "description": item["description"],
+                                "pdf": item.get("pdf", "?"),
+                            })
+
+                        result.skill_groups.append({
+                            "canonical": canonical,
+                            "members": members,
+                            "type": "cross-batch-inline",
+                        })
+
+            # Store items for cross-batch (parallel mode uses this after all PDFs)
+            result.knowledge_items = items
             result.status = "PASS"
 
         except Exception as e:
@@ -488,6 +480,9 @@ class TestRunner:
         self._total_llm_hits = 0
         self._total_llm_misses = 0
 
+        # Cross-batch tracking per course
+        self._course_items: dict[str, list[dict]] = {}  # course_folder -> accumulated items
+
         # Set up interrupt handler
         signal.signal(signal.SIGINT, self._handle_interrupt)
 
@@ -510,13 +505,27 @@ class TestRunner:
             self._print_dry_run(pdfs)
             return 0
 
+        # Determine processing mode (only matters for --full)
+        is_sequential = self.args.sequential
+        is_independent = self.args.independent
+        # Default is parallel (Pro-like) with cross-batch
+
         # Run tests
         total = len(pdfs)
+        prev_course = None
+
         for i, (pdf_path, course_folder) in enumerate(pdfs):
             if self._interrupted:
                 break
 
             course_name = self.tester._get_course_name(course_folder)
+
+            # Cross-batch merge when course changes (parallel mode only)
+            if prev_course and prev_course != course_folder and self.args.full:
+                if not is_sequential and not is_independent:
+                    self._run_cross_batch_merge(prev_course)
+
+            prev_course = course_folder
             self._print_progress(i, total, pdf_path)
 
             # Accumulate and reset cache stats for per-PDF tracking
@@ -530,7 +539,17 @@ class TestRunner:
             if self.args.parse:
                 result = self.tester.test_parse(pdf_path)
             elif self.args.full:
-                result = self.tester.test_full(pdf_path, course_name)
+                # Sequential mode: pass existing items for inline merge
+                existing_items = None
+                if is_sequential:
+                    existing_items = self._course_items.get(course_folder, [])
+                result = self.tester.test_full(pdf_path, course_name, existing_items)
+
+                # Accumulate items for cross-batch (parallel) or next PDF (sequential)
+                if result.status == "PASS" and result.knowledge_items:
+                    if course_folder not in self._course_items:
+                        self._course_items[course_folder] = []
+                    self._course_items[course_folder].extend(result.knowledge_items)
             elif self.args.analyze:
                 result = self.tester.test_analyze(pdf_path, course_name)
             else:  # Default: split
@@ -541,6 +560,10 @@ class TestRunner:
 
             if not self.args.quiet:
                 self._print_result(result)
+
+        # Final cross-batch merge for last course (parallel mode only)
+        if self.args.full and prev_course and not is_sequential and not is_independent:
+            self._run_cross_batch_merge(prev_course)
 
         # Capture final PDF's LLM stats
         if self.tester.llm:
@@ -563,6 +586,59 @@ class TestRunner:
         self._save_failed_list()
 
         return 0 if self.summary.failed == 0 and self.summary.errors == 0 else 1
+
+    def _run_cross_batch_merge(self, course_folder: str):
+        """Run cross-batch merge for accumulated items in a course (parallel mode)."""
+        items = self._course_items.get(course_folder, [])
+        if len(items) < 2:
+            return
+
+        if not self.args.quiet:
+            print(f"\n{cyan('Cross-batch merge')} for {course_folder}: {len(items)} items")
+
+        try:
+            self.tester._init_llm()
+            group_indices = group_items(items, self.tester.llm)
+
+            if not group_indices:
+                if not self.args.quiet:
+                    print("  No cross-PDF duplicates found")
+                return
+
+            for indices in group_indices:
+                group_items_list = [items[i] for i in indices if i < len(items)]
+                if len(group_items_list) < 2:
+                    continue
+
+                # Check if group spans multiple PDFs
+                pdfs_in_group = set(item.get("pdf", "?") for item in group_items_list)
+                if len(pdfs_in_group) < 2:
+                    continue  # Internal merge, already handled
+
+                group_names = [item["name"] for item in group_items_list]
+                canonical = get_canonical_name(group_names, self.tester.llm)
+
+                members = []
+                for item in group_items_list:
+                    members.append({
+                        "name": item["name"],
+                        "description": item.get("description", ""),
+                        "pdf": item.get("pdf", "?"),
+                    })
+
+                self.summary.cross_batch_groups.append({
+                    "course": course_folder,
+                    "canonical": canonical,
+                    "members": members,
+                })
+
+                if not self.args.quiet:
+                    print(f"  {bold(canonical)}")
+                    for m in members:
+                        print(f"    ← {m['name']} ({m['pdf']})")
+
+        except Exception as e:
+            print(red(f"  Cross-batch merge failed: {e}"))
 
     def run_golden(self) -> int:
         """Run golden regression tests."""
@@ -775,26 +851,45 @@ class TestRunner:
 
         # Show skill groups (--full mode)
         if result.skill_groups:
-            print(f"\n  {cyan('Skill Groups')} ({len(result.skill_groups)}):")
-            for group in result.skill_groups:
-                canonical = group["canonical"]
-                print(f"    {bold(canonical)}")
-                for member in group["members"]:
-                    name = member["name"]
-                    print(f"      ← {name}")
-                    for ex in member.get("exercises", []):
-                        num = ex.get("number", "?")
-                        if ex.get("is_sub"):
-                            ctx = ex.get("context", "")
-                            txt = ex.get("text", "")
-                            if ctx:
-                                print(f"        [{num}] {dim(self._truncate_output(ctx, 50))}")
-                                print(f"             \"{self._truncate_output(txt, 50)}\"")
+            # Separate internal vs cross-batch-inline groups
+            internal_groups = [g for g in result.skill_groups if g.get("type") == "internal"]
+            cross_inline_groups = [g for g in result.skill_groups if g.get("type") == "cross-batch-inline"]
+
+            if internal_groups:
+                print(f"\n  {cyan('Internal Merge')} ({len(internal_groups)} groups within this PDF):")
+                for group in internal_groups:
+                    canonical = group["canonical"]
+                    print(f"    {bold(canonical)}")
+                    for member in group["members"]:
+                        name = member["name"]
+                        print(f"      ← {name}")
+                        for ex in member.get("exercises", []):
+                            num = ex.get("number", "?")
+                            if ex.get("is_sub"):
+                                ctx = ex.get("context", "")
+                                txt = ex.get("text", "")
+                                if ctx:
+                                    print(f"        [{num}] {dim(self._truncate_output(ctx, 50))}")
+                                    print(f"             \"{self._truncate_output(txt, 50)}\"")
+                                else:
+                                    print(f"        [{num}] \"{self._truncate_output(txt, 50)}\"")
                             else:
-                                print(f"        [{num}] \"{self._truncate_output(txt, 50)}\"")
-                        else:
-                            txt = ex.get("text", "")
-                            print(f"        [{num}] \"{self._truncate_output(txt, 60)}\"")
+                                txt = ex.get("text", "")
+                                print(f"        [{num}] \"{self._truncate_output(txt, 60)}\"")
+
+            if cross_inline_groups:
+                print(f"\n  {yellow('Cross-batch Inline')} ({len(cross_inline_groups)} groups vs previous PDFs):")
+                for group in cross_inline_groups:
+                    canonical = group["canonical"]
+                    print(f"    {bold(canonical)}")
+                    for member in group["members"]:
+                        name = member["name"]
+                        pdf = member.get("pdf", "?")
+                        print(f"      ← {name} ({pdf})")
+
+        # Show knowledge items count
+        if result.knowledge_items:
+            print(f"\n  Knowledge items: {len(result.knowledge_items)}")
 
     def _truncate_output(self, text: str, max_len: int = 60) -> str:
         """Truncate text for output."""
@@ -851,6 +946,20 @@ class TestRunner:
         if total_llm > 0:
             hit_rate = (self._total_llm_hits / total_llm) * 100
             print(f"LLM calls: {total_llm} ({self._total_llm_hits} cached, {self._total_llm_misses} new, {hit_rate:.0f}% hit rate)")
+
+        # Cross-batch merge summary (parallel mode)
+        if self.summary.cross_batch_groups:
+            print(f"\n{cyan('Cross-batch merges')}: {len(self.summary.cross_batch_groups)} groups found")
+            for group in self.summary.cross_batch_groups:
+                print(f"  [{group['course']}] {group['canonical']}")
+                for m in group['members']:
+                    print(f"    ← {m['name']} ({m['pdf']})")
+
+        # Knowledge items per course summary
+        if self._course_items and self.args.full:
+            print(f"\n{cyan('Knowledge items per course')}:")
+            for course, items in sorted(self._course_items.items()):
+                print(f"  {course}: {len(items)} items")
 
         if self.summary.warnings:
             print(f"\n{yellow('Warnings')}:")
@@ -1124,12 +1233,20 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --smoke              Quick test (1 PDF per course)
-  %(prog)s --golden             Run regression tests (exact counts)
-  %(prog)s --pdf path.pdf --full  Show skill groups/merges for single PDF
-  %(prog)s --course ADE         Test all PDFs in ADE course
-  %(prog)s --smoke --save       Save results permanently
-  %(prog)s --rerun-failed       Rerun only failed tests
+  %(prog)s --smoke                     Quick test (1 PDF per course)
+  %(prog)s --golden                    Run regression tests (exact counts)
+  %(prog)s --course ADE                Test all PDFs in ADE course
+  %(prog)s --pdf path.pdf --full       Single PDF with internal merge
+  %(prog)s --course SO --full          Pro mode: parallel + cross-batch merge
+  %(prog)s --course SO --full --sequential   Free mode: sequential, inline merge
+  %(prog)s --course SO --full --independent  Internal merge only, no cross-batch
+  %(prog)s --smoke --save              Save results permanently
+  %(prog)s --rerun-failed              Rerun only failed tests
+
+Processing Modes (--full with multiple PDFs):
+  --parallel (default)   Pro-like: Independent PDFs + cross-batch merge at end
+  --sequential           Free-like: Each PDF sees previous items inline
+  --independent          No cross-batch merge, internal merge only
         """,
     )
 
@@ -1148,6 +1265,15 @@ Examples:
     depth_group.add_argument("--split", action="store_true", help="Test parse + split (stages 1-2, default)")
     depth_group.add_argument("--analyze", action="store_true", help="Test parse + split + analyze (stages 1-3)")
     depth_group.add_argument("--full", action="store_true", help="Full pipeline + skill grouping (shows merges)")
+
+    # Processing mode (for --full with multiple PDFs)
+    proc_group = parser.add_mutually_exclusive_group()
+    proc_group.add_argument("--parallel", action="store_true",
+                           help="Pro mode: Independent PDFs + cross-batch merge at end (default)")
+    proc_group.add_argument("--sequential", action="store_true",
+                           help="Free mode: Sequential, each PDF sees previous items inline")
+    proc_group.add_argument("--independent", action="store_true",
+                           help="Independent PDFs, no cross-batch merge (internal merge only)")
 
     # Output options
     parser.add_argument("--save", action="store_true", help="Save results to test-results/")
