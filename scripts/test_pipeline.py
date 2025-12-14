@@ -835,7 +835,6 @@ class TestRunner:
         # Verbose: show exercise details
         if self.args.verbose and result.exercise_details:
             print()
-            current_parent = None
             for ex in result.exercise_details:
                 if ex["is_sub"]:
                     prefix = "    "
@@ -1107,8 +1106,8 @@ class TestRunner:
                             # Add continuation marker at end of lines that wrap
                             wrap_lines = wrapped.split('\n')
                             if len(wrap_lines) > 1:
-                                wrap_lines = [l + "-" if i < len(wrap_lines) - 1 else l
-                                              for i, l in enumerate(wrap_lines)]
+                                wrap_lines = [line + "-" if i < len(wrap_lines) - 1 else line
+                                              for i, line in enumerate(wrap_lines)]
                             lines.append('\n'.join(wrap_lines))
 
                     # Print standalone exercises (no subs)
@@ -1124,8 +1123,8 @@ class TestRunner:
                         # Add continuation marker at end of lines that wrap
                         wrap_lines = wrapped.split('\n')
                         if len(wrap_lines) > 1:
-                            wrap_lines = [l + "-" if i < len(wrap_lines) - 1 else l
-                                          for i, l in enumerate(wrap_lines)]
+                            wrap_lines = [line + "-" if i < len(wrap_lines) - 1 else line
+                                          for i, line in enumerate(wrap_lines)]
                         lines.append('\n'.join(wrap_lines))
                 lines.append("")
 
