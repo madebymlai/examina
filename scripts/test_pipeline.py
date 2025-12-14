@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.pdf_processor import PDFProcessor, PDFContent
 from core.exercise_splitter import ExerciseSplitter, Exercise
 from core.analyzer import ExerciseAnalyzer
-from core.post_processor import group_items_by_skill, get_canonical_name
+from core.merger import group_items_by_skill, get_canonical_name
 
 
 def generate_item_description(name: str, exercises: list[dict], llm) -> str:

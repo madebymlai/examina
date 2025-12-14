@@ -58,7 +58,7 @@ Write a description that:
 - Excludes facts, data, scenarios, or question format
 - Would fit any exercise testing this specific concept
 
-**Be concise. Start directly with the concept, not 'The skill...' or 'The ability...'**
+**Start with action verb (define, state, compute, find, explain, apply, etc.)**
 
 Return JSON: {{"description": "..."}}"""
 
@@ -115,8 +115,8 @@ Theoretical ≠ Practical (different task types)
 - Theoretical: define, explain, state, describe
 - Practical: compute, calculate, find, apply, solve
 
-Return JSON: {{"groups": [[1, 2]]}}
-Return {{"groups": []}} if all different."""
+Return JSON: {{"reasoning": "...", "groups": [[1, 2]]}}
+Return {{"reasoning": "...", "groups": []}} if all different."""
 
     try:
         logger.info(f"Grouping {len(items)} items by description")
@@ -137,13 +137,22 @@ Return {{"groups": []}} if all different."""
         # Convert 1-indexed to 0-indexed
         result_groups: list[list[int]] = []
         for group in groups:
-            if not isinstance(group, list) or len(group) < 2:
+            # Handle {"items": [...], "reason": "..."} format
+            if isinstance(group, dict):
+                group_items = group.get("items", [])
+                reason = group.get("reason", "")
+            elif isinstance(group, list):
+                group_items = group
+                reason = ""
+            else:
+                continue
+            if len(group_items) < 2:
                 continue
             # Convert to 0-indexed and validate
-            indices = [idx - 1 for idx in group if isinstance(idx, int) and 0 < idx <= len(items)]
+            indices = [idx - 1 for idx in group_items if isinstance(idx, int) and 0 < idx <= len(items)]
             if len(indices) >= 2:
                 result_groups.append(indices)
-                logger.info(f"Group: items {indices}")
+                logger.info(f"Group: items {indices}" + (f" - {reason}" if reason else ""))
 
         return result_groups
 

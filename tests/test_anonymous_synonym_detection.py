@@ -652,7 +652,7 @@ def test_with_llm(llm_manager=None):
         print("To run: test_with_llm(LLMManager(provider='deepseek'))")
         return
 
-    from core.post_processor import detect_synonyms
+    from core.merger import detect_synonyms
 
     print("\n" + "="*70)
     print("LLM-BASED SYNONYM DETECTION TESTS")

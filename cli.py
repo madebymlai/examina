@@ -3147,7 +3147,7 @@ def deduplicate(course, dry_run, threshold, bilingual, clean_orphans):
     llm_manager = None
     try:
         from models.llm_manager import LLMManager
-        from core.post_processor import detect_synonyms
+        from core.merger import detect_synonyms
 
         # Create LLM manager for synonym detection
         llm_provider = Config.LLM_PROVIDER
