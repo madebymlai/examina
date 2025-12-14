@@ -58,8 +58,7 @@ Write a description that:
 - Excludes facts, data, scenarios, or question format
 - Would fit any exercise testing this specific concept
 
-**Be concise.**
-**NO preambles about skill or exercise.**
+**Be concise. Start directly with the concept, not 'The skill...' or 'The ability...'**
 
 Return JSON: {{"description": "..."}}"""
 
