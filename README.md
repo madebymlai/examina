@@ -18,9 +18,8 @@ examina-cli           - Local CLI (ChromaDB, vector search)
 | Module | Purpose |
 |--------|---------|
 | `core/analyzer.py` | Exercise analysis, knowledge extraction |
-| `core/tutor.py` | Adaptive explanations |
-| `core/quiz_engine.py` | Quiz generation |
-| `core/review_engine.py` | Answer evaluation |
+| `core/tutor.py` | Knowledge item teaching (Learn mode) |
+| `core/review_engine.py` | Exercise generation & answer evaluation (Review mode) |
 | `core/sm2.py` | Spaced repetition algorithm |
 | `core/pdf_processor.py` | PDF text extraction |
 | `core/exercise_splitter.py` | Exercise detection |
@@ -34,9 +33,9 @@ pip install git+https://github.com/madebymlai/examina.git
 ## Usage
 
 ```python
-from core.analyzer import ExerciseAnalyzer, generate_item_description
+from core.analyzer import ExerciseAnalyzer
 from core.tutor import Tutor
-from core.quiz_engine import QuizEngine
+from core.review_engine import ReviewEngine
 from models.llm_manager import LLMManager
 
 llm = LLMManager()
@@ -48,11 +47,25 @@ result = analyzer.analyze_exercise(
     course_name="Discrete Math"
 )
 
-# Generate explanation
+# Learn mode - teach a knowledge item
 tutor = Tutor(llm_manager=llm, language="en")
-explanation = await tutor.explain_concept(
-    knowledge_item_name="even_number_properties",
+explanation = tutor.learn_knowledge_item(
+    knowledge_item={"name": "Even Numbers", "learning_approach": "conceptual"},
     exercises=[...]
+)
+
+# Review mode - generate exercise and evaluate answer
+engine = ReviewEngine(llm)
+exercise = engine.generate_exercise(
+    knowledge_item_name="Even Numbers",
+    learning_approach="conceptual",
+    examples=[...]
+)
+result = engine.evaluate_answer(
+    exercise_text=exercise.exercise_text,
+    expected_answer=exercise.expected_answer,
+    student_answer="user's answer",
+    exercise_type=exercise.exercise_type
 )
 ```
 

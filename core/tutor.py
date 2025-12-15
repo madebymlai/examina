@@ -672,6 +672,15 @@ class Tutor:
             prompt_parts.append(f"Source: {example_exercise.get('source_pdf', 'Unknown')}")
             prompt_parts.append(example_exercise.get("text", example_exercise.get("content", "")))
 
+            # Add image context if exercise has associated visual content
+            image_context = example_exercise.get("image_context")
+            if image_context:
+                prompt_parts.append("")
+                prompt_parts.append("**IMAGE DESCRIPTION** (student cannot see the original):")
+                prompt_parts.append(image_context)
+                prompt_parts.append("")
+                prompt_parts.append("**Do NOT** reference images ('see figure', 'as shown'). **Describe visual content inline**.")
+
             # Add solution if available (for reference)
             solution = example_exercise.get("solution")
             if solution:
@@ -786,6 +795,15 @@ class Tutor:
             prompt_parts.append("Example exercise from past exams:")
             prompt_parts.append(f"Source: {example_exercise.get('source_pdf', 'Unknown')}")
             prompt_parts.append(example_exercise.get("text", example_exercise.get("content", "")))
+
+            # Add image context if exercise has associated visual content
+            image_context = example_exercise.get("image_context")
+            if image_context:
+                prompt_parts.append("")
+                prompt_parts.append("**IMAGE DESCRIPTION** (student cannot see the original):")
+                prompt_parts.append(image_context)
+                prompt_parts.append("")
+                prompt_parts.append("**Do NOT** reference images ('see figure', 'as shown'). **Describe visual content inline**.")
 
             # Add solution if available
             solution = example_exercise.get("solution")

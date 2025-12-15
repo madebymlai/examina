@@ -86,6 +86,9 @@ class Config:
     DEEPSEEK_REASONER_MODEL = os.getenv(
         "DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"
     )  # R1 with CoT
+    DEEPSEEK_VISION_MODEL = os.getenv(
+        "DEEPSEEK_VISION_MODEL", "deepseek-chat"
+    )  # Vision model (supports images)
 
     # Processing Settings
     PDF_MAX_SIZE_MB = 50

@@ -1313,6 +1313,196 @@ class LLMManager:
         # Should never reach here, but just in case
         return LLMResponse(text="", model=model, success=False, error="Max retries exceeded")
 
+    def generate_with_image(
+        self,
+        prompt: str,
+        image_bytes: bytes,
+        model: Optional[str] = None,
+        system: Optional[str] = None,
+        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+    ) -> LLMResponse:
+        """Generate text from LLM with image input (Vision).
+
+        Args:
+            prompt: User prompt describing what to do with the image
+            image_bytes: Image data as bytes (PNG, JPEG, etc.)
+            model: Vision model to use (defaults to DEEPSEEK_VISION_MODEL)
+            system: System prompt
+            temperature: Sampling temperature (lower for OCR tasks)
+            max_tokens: Maximum tokens to generate
+
+        Returns:
+            LLMResponse with generated text
+        """
+        # Only DeepSeek vision is supported for now
+        if self.provider != "deepseek":
+            return LLMResponse(
+                text="",
+                model=model or "unknown",
+                success=False,
+                error=f"Vision not supported for provider '{self.provider}'. Use 'deepseek' provider.",
+            )
+
+        model = model or Config.DEEPSEEK_VISION_MODEL
+
+        # Apply rate limiting before making request
+        wait_time = self.rate_limiter.wait_if_needed(self.provider)
+        if wait_time > 0:
+            print(
+                f"  [RATE LIMIT] Waiting {wait_time:.1f}s for '{self.provider}' (rate limit protection)"
+            )
+
+        response = self._deepseek_generate_with_image(
+            prompt, image_bytes, model, system, temperature, max_tokens
+        )
+
+        # Record usage if request was successful
+        if response.success:
+            tokens_used = 0
+            if response.metadata:
+                usage = response.metadata.get("usage", {})
+                if isinstance(usage, dict):
+                    tokens_used = usage.get("total_tokens", 0)
+                    if tokens_used == 0:
+                        tokens_used = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+
+            self.rate_limiter.record_request(self.provider, tokens_used=tokens_used)
+
+        return response
+
+    def _deepseek_generate_with_image(
+        self,
+        prompt: str,
+        image_bytes: bytes,
+        model: str,
+        system: Optional[str],
+        temperature: float,
+        max_tokens: Optional[int],
+    ) -> LLMResponse:
+        """Generate using DeepSeek Vision API with image input.
+
+        Args:
+            prompt: User prompt
+            image_bytes: Image data as bytes
+            model: Model name
+            system: System prompt
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens
+
+        Returns:
+            LLMResponse
+        """
+        import base64
+        import time
+
+        # Check for API key upfront
+        if not Config.DEEPSEEK_API_KEY:
+            return LLMResponse(
+                text="",
+                model=model,
+                success=False,
+                error="DEEPSEEK_API_KEY not set. Get one at https://platform.deepseek.com",
+            )
+
+        # Encode image to base64
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+        # Detect image type from bytes
+        if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            media_type = "image/png"
+        elif image_bytes[:2] == b'\xff\xd8':
+            media_type = "image/jpeg"
+        else:
+            media_type = "image/png"  # Default to PNG
+
+        max_retries = 3
+        base_delay = 2
+
+        for attempt in range(max_retries):
+            try:
+                url = "https://api.deepseek.com/v1/chat/completions"
+
+                # Build messages with image content
+                messages = []
+                if system:
+                    messages.append({"role": "system", "content": system})
+
+                # User message with image and text
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{image_b64}"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                })
+
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                }
+
+                if max_tokens:
+                    payload["max_tokens"] = max_tokens
+
+                headers = {
+                    "Authorization": f"Bearer {Config.DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json",
+                }
+
+                response = requests.post(url, json=payload, headers=headers, timeout=120)
+                response.raise_for_status()
+
+                result = response.json()
+                text = result["choices"][0]["message"]["content"]
+
+                return LLMResponse(
+                    text=text,
+                    model=model,
+                    success=True,
+                    metadata={
+                        "usage": result.get("usage"),
+                        "finish_reason": result["choices"][0].get("finish_reason"),
+                    },
+                )
+
+            except requests.exceptions.HTTPError as e:
+                error_msg = f"DeepSeek Vision API error: {e}"
+                if e.response.status_code == 401:
+                    error_msg = "Invalid DEEPSEEK_API_KEY. Check your API key."
+                    return LLMResponse(text="", model=model, success=False, error=error_msg)
+                elif e.response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2**attempt)
+                        print(f"  Rate limit hit, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        error_msg = "Rate limit exceeded. All retries exhausted."
+                elif e.response.status_code == 400:
+                    try:
+                        error_detail = e.response.json()
+                        error_msg = f"DeepSeek Vision API error: {error_detail}"
+                    except:
+                        error_msg = f"DeepSeek Vision API error: {e} - {e.response.text}"
+
+                return LLMResponse(text="", model=model, success=False, error=error_msg)
+            except Exception as e:
+                return LLMResponse(
+                    text="", model=model, success=False, error=f"DeepSeek Vision error: {str(e)}"
+                )
+
+        return LLMResponse(text="", model=model, success=False, error="Max retries exceeded")
+
     def embed(self, text: str, model: Optional[str] = None) -> Optional[List[float]]:
         """Generate embeddings for text.
 

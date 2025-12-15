@@ -36,6 +36,7 @@ class ExerciseExample:
     text: str
     solution: Optional[str] = None
     source_type: str = "practice"  # "exam" or "practice"
+    image_context: Optional[str] = None  # Vision LLM description of associated diagram
 
 
 @dataclass
@@ -226,6 +227,11 @@ DO NOT:
 - Use round/obvious numbers if examples don't
 - Skip the tricky parts that make exam questions challenging
 - Change the language from the examples
+- Reference images the student cannot see ("see figure", "look at the table", "as shown")
+
+**IMAGE CONTEXT**: If examples include [IMAGE CONTEXT: ...], this describes visual content the student cannot see.
+- Use this information to understand the exercise
+- If creating a similar exercise, **describe visual content inline** instead of referencing an image
 
 LaTeX: Use $...$ for inline math, $$...$$ for display math.
 
@@ -339,6 +345,8 @@ Return valid JSON:
         formatted = []
         for i, ex in enumerate(examples, 1):
             text = f"Example {i}:\n{ex.text}"
+            if ex.image_context:
+                text += f"\n[IMAGE CONTEXT: {ex.image_context}]"
             if ex.solution:
                 text += f"\nSolution: {ex.solution}"
             formatted.append(text)
