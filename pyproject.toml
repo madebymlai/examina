@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "examina-core"
-version = "0.15.0"
+version = "0.16.0"
 description = "AI-powered exam preparation system - core library"
 readme = "README.md"
 license = {text = "MIT"}
@@ -31,8 +31,6 @@ dependencies = [
     "pyyaml>=6.0",
     "pdfplumber>=0.10.0",
     "pymupdf>=1.23.0",
-    "sentence-transformers>=2.2.0",
-    "chromadb>=0.4.0",
     "rich>=13.0.0",
     "click>=8.1.0",
     "python-dotenv>=1.0.0",

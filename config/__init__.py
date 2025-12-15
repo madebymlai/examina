@@ -46,7 +46,6 @@ class Config:
     BASE_DIR = _get_base_dir()
     DATA_DIR = BASE_DIR / "data"
     DB_PATH = DATA_DIR / "examina.db"
-    CHROMA_PATH = DATA_DIR / "chroma"
     FILES_PATH = DATA_DIR / "files"
     PDFS_PATH = FILES_PATH / "pdfs"
     IMAGES_PATH = FILES_PATH / "images"
@@ -212,7 +211,6 @@ class Config:
         cls.FILES_PATH.mkdir(exist_ok=True, parents=True)
         cls.PDFS_PATH.mkdir(exist_ok=True, parents=True)
         cls.IMAGES_PATH.mkdir(exist_ok=True, parents=True)
-        cls.CHROMA_PATH.mkdir(exist_ok=True, parents=True)
         cls.CACHE_PATH.mkdir(exist_ok=True, parents=True)
         cls.STUDY_STRATEGY_CACHE_DIR.mkdir(exist_ok=True, parents=True)
 
