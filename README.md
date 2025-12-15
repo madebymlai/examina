@@ -1,106 +1,90 @@
-# Examina
+# Examina Core
 
-AI-powered exam preparation that learns from your course materials.
+Core business logic for AI-powered exam preparation.
 
 ## What It Does
 
-Upload past exams, homework, or problem sets. Examina analyzes them to:
+- **Exercise Analysis** - Extracts knowledge items from PDFs
+- **Smart Splitting** - Detects exercises, sub-questions, solutions
+- **Adaptive Tutoring** - AI tutoring that adjusts to mastery level
+- **Spaced Repetition** - SM2 algorithm for optimal retention
+- **Quiz Engine** - Generates practice quizzes
 
-- **Discover knowledge** - Identifies concepts, procedures, theorems, and formulas
-- **Smart merging** - Groups equivalent items across PDFs using AI reasoning
-- **Teach adaptively** - AI tutoring that adjusts to your mastery level
-- **Track progress** - Spaced repetition with SM2 algorithm
-- **Generate practice** - Quizzes that prioritize weak areas
+## Architecture
 
-## Quick Start
+```
+examina (this repo)     - Core logic, lightweight
+    ↓ used by
+examina-cloud           - Web platform (FastAPI + React)
+examina-cli             - Local CLI tool (separate repo)
+```
+
+## Installation
 
 ```bash
-# Setup
+pip install git+https://github.com/madebymlai/examina.git
+```
+
+Or for development:
+```bash
 git clone https://github.com/madebymlai/examina.git
 cd examina
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-
-# Configure (set at least one)
-export DEEPSEEK_API_KEY="your-key"  # Best for bulk analysis
-export GROQ_API_KEY="your-key"      # Fast, free tier available
-
-# Initialize
-python3 cli.py init
+pip install -e .
 ```
 
 ## Usage
 
-```bash
-# 1. Create course
-python3 cli.py add-course --code ADE --name "Computer Architecture"
+```python
+from core.analyzer import ExerciseAnalyzer, generate_item_description
+from core.tutor import Tutor
+from core.quiz_engine import QuizEngine
+from core.pdf_processor import PDFProcessor
+from models.llm_manager import LLMManager
 
-# 2. Upload materials (exams, homework, problem sets)
-python3 cli.py ingest --course ADE --zip materials.zip
+# Initialize
+llm = LLMManager()
 
-# 3. Analyze (discovers knowledge items)
-python3 cli.py analyze --course ADE
+# Analyze an exercise
+analyzer = ExerciseAnalyzer(llm_manager=llm, language="en")
+result = analyzer.analyze_exercise(
+    exercise_text="Prove that the sum of two even numbers is even.",
+    course_name="Discrete Math"
+)
+print(result.knowledge_items)  # [KnowledgeItemInfo(name='even_number_properties', ...)]
 
-# 4. Learn a topic
-python3 cli.py learn --course ADE --item "matrix_diagonalization"
-
-# 5. Take adaptive quiz
-python3 cli.py quiz --course ADE --questions 10 --adaptive
-
-# 6. Check progress
-python3 cli.py progress --course ADE
+# Generate learning content
+tutor = Tutor(llm_manager=llm, language="en")
+explanation = await tutor.explain_concept(
+    knowledge_item_name="even_number_properties",
+    exercises=[...],
+    learning_approach="conceptual"
+)
 ```
 
-## What Can You Upload?
+## Modules
 
-Any PDF with numbered exercises (max 20 pages):
-- Past exams (with or without solutions)
-- Homework assignments
-- Practice problem sets
-- Exercise collections
-
-**Works with any language** - Italian, English, Spanish, French, etc.
-
-## Features
-
-### Analysis
-- Language-agnostic exercise detection
-- Smart sub-question splitting
-- Knowledge item extraction (procedures, theorems, definitions, formulas)
-- DeepSeek reasoner for accurate item grouping
-
-### Learning
-- Adaptive depth based on mastery
-- Learning approach detection (procedural, conceptual, factual, analytical)
-- Real-time feedback
-
-### Progress
-- SM-2 spaced repetition
-- Mastery tracking per knowledge item
-- Weak area detection
-- Study suggestions
-
-### Performance
-- Provider routing (cheapest per task type)
-- Response caching (faster re-analysis)
-- Async analysis pipeline
+| Module | Purpose |
+|--------|---------|
+| `core/analyzer.py` | Exercise analysis, knowledge extraction |
+| `core/tutor.py` | Adaptive explanations |
+| `core/quiz_engine.py` | Quiz generation and scoring |
+| `core/review_engine.py` | Answer evaluation |
+| `core/sm2.py` | Spaced repetition algorithm |
+| `core/pdf_processor.py` | PDF text extraction |
+| `core/exercise_splitter.py` | Exercise detection |
 
 ## LLM Providers
 
-| Provider  | Best For                   | Model |
-|-----------|----------------------------|-------|
-| DeepSeek  | Analysis, grouping         | deepseek-chat, deepseek-reasoner |
-| Groq      | CLI quizzes (30 RPM limit) | Free tier available |
-| Anthropic | Premium explanations       | Claude |
-| Ollama    | Local, private             | Free (requires GPU) |
+| Provider  | Best For |
+|-----------|----------|
+| DeepSeek  | Analysis, grouping (deepseek-reasoner) |
+| Groq      | Fast responses |
+| Anthropic | Premium explanations |
 
-## Web Version
+## Related
 
-For multi-user web deployment, see [examina-cloud](https://github.com/madebymlai/examina-cloud).
-
-## Privacy
-
-Your materials stay local. Content is only sent to LLM providers for analysis. We don't train on your data.
+- [examina-cloud](https://github.com/madebymlai/examina-cloud) - Web platform
+- [examina-cli](https://github.com/madebymlai/examina-cli) - Local CLI tool
 
 ## License
 
