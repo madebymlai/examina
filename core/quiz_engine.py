@@ -634,7 +634,7 @@ class QuizEngine:
 
             db.conn.commit()
 
-    def _update_progress(self, session: QuizSession, db: Database) -> None:
+    def _update_progress(self, session: QuizSession, db: Any) -> None:
         """Update student progress based on quiz results.
 
         Uses spaced repetition (SM-2 algorithm) to schedule reviews.

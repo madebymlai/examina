@@ -128,7 +128,7 @@ class QuizManager:
 
     def _select_exercises(
         self,
-        db: Database,
+        db: Any,
         course_code: str,
         quiz_type: str,
         topic_id: Optional[int],
@@ -219,7 +219,7 @@ class QuizManager:
         return exercises
 
     def _prioritize_due_exercises(
-        self, db: Database, exercises: List[Dict[str, Any]], count: int
+        self, db: Any, exercises: List[Dict[str, Any]], count: int
     ) -> List[Dict[str, Any]]:
         """Prioritize exercises based on SM-2 review schedule.
 
@@ -482,7 +482,7 @@ class QuizManager:
         return (round(score, 2), score >= 0.7)
 
     def _update_sm2_progress(
-        self, db: Database, knowledge_item_id: str, course_code: str, quality: int, is_correct: bool
+        self, db: Any, knowledge_item_id: str, course_code: str, quality: int, is_correct: bool
     ) -> Dict[str, Any]:
         """Update SM-2 progress for a core loop.
 
