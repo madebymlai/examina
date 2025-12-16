@@ -131,11 +131,11 @@ def regenerate_description(
     if len(descriptions) == 1:
         return descriptions[0]
 
-    prompt = f"""Write the most representative text in English for a chapter subtitle:
+    prompt = f"""Write the most representative skill description in English (start with a verb, no colons):
 
 {chr(10).join(f"- {d}" for d in descriptions)}
 
-Return JSON: {{"subtitle": "..."}}"""
+Return JSON: {{"description": "..."}}"""
 
     try:
         response = llm.generate(
@@ -147,7 +147,7 @@ Return JSON: {{"subtitle": "..."}}"""
         )
         if response and response.text:
             result = json.loads(response.text)
-            return result.get("subtitle", max(descriptions, key=len))
+            return result.get("description", max(descriptions, key=len))
         return max(descriptions, key=len)
     except Exception as e:
         logger.warning(f"Description selection failed: {e}")

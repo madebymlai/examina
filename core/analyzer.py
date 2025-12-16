@@ -258,17 +258,17 @@ def generate_item_description(
 
     system = "You are a textbook editor."
 
-    prompt = f"""Write a chapter subtitle in English for these exercises:
+    prompt = f"""Describe in English the skill/concept being tested (start with a verb, no colons):
 
 {chr(10).join(f"- {t}" for t in exercises_text)}
 
-Return JSON: {{"subtitle": "..."}}"""
+Return JSON: {{"description": "..."}}"""
 
     try:
         response = llm.generate(prompt=prompt, model="deepseek-reasoner", system=system)
         if response and response.text:
             result = json.loads(response.text)
-            return result.get("subtitle", exercises_text[0][:100])
+            return result.get("description", exercises_text[0][:100])
         return exercises_text[0][:100]
     except Exception as e:
         logger.warning(f"Description generation failed: {e}")
