@@ -46,7 +46,7 @@ class LLMManager:
         """Initialize LLM manager.
 
         Args:
-            provider: LLM provider ("ollama", "anthropic", "openai", "groq", "deepseek")
+            provider: LLM provider ("ollama", "anthropic", "openai", "groq", "deepseek", "openrouter")
             base_url: Base URL for API (for Ollama)
             quiet: If True, suppress cache hit/miss messages (use get_cache_stats() for summary)
         """
@@ -66,6 +66,11 @@ class LLMManager:
         elif provider == "deepseek":
             self.primary_model = Config.DEEPSEEK_MODEL
             self.fast_model = Config.DEEPSEEK_MODEL
+            self.embed_model = Config.LLM_EMBED_MODEL  # Still use Ollama for embeddings
+        elif provider == "openrouter":
+            self.primary_model = Config.OPENROUTER_MODEL
+            self.fast_model = Config.OPENROUTER_MODEL
+            self.vision_model = Config.OPENROUTER_VISION_MODEL
             self.embed_model = Config.LLM_EMBED_MODEL  # Still use Ollama for embeddings
         else:
             self.primary_model = Config.LLM_PRIMARY_MODEL  # Heavy reasoning
@@ -312,6 +317,10 @@ class LLMManager:
             response = self._deepseek_generate(
                 prompt, model, system, temperature, max_tokens, json_mode
             )
+        elif self.provider == "openrouter":
+            response = self._openrouter_generate(
+                prompt, model, system, temperature, max_tokens, json_mode
+            )
         else:
             response = LLMResponse(
                 text="",
@@ -385,6 +394,10 @@ class LLMManager:
             )
         elif self.provider == "deepseek":
             response = await self._deepseek_generate_async(
+                prompt, model, system, temperature, max_tokens, json_mode
+            )
+        elif self.provider == "openrouter":
+            response = await self._openrouter_generate_async(
                 prompt, model, system, temperature, max_tokens, json_mode
             )
         else:
@@ -1313,6 +1326,284 @@ class LLMManager:
         # Should never reach here, but just in case
         return LLMResponse(text="", model=model, success=False, error="Max retries exceeded")
 
+    def _openrouter_generate(
+        self,
+        prompt: str,
+        model: str,
+        system: Optional[str],
+        temperature: float,
+        max_tokens: Optional[int],
+        json_mode: bool,
+    ) -> LLMResponse:
+        """Generate using OpenRouter API (OpenAI-compatible) with automatic retry on rate limits.
+
+        Args:
+            prompt: User prompt
+            model: Model name (e.g., "deepseek/deepseek-chat", "google/gemini-2.0-flash-001")
+            system: System prompt
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens
+            json_mode: Force JSON output
+
+        Returns:
+            LLMResponse
+        """
+        import time
+
+        # Check for API key upfront
+        if not Config.OPENROUTER_API_KEY:
+            return LLMResponse(
+                text="",
+                model=model,
+                success=False,
+                error="OPENROUTER_API_KEY not set. Get one at https://openrouter.ai/keys",
+            )
+
+        # Check cache first
+        cache_key = self._generate_cache_key(
+            provider="openrouter",
+            model=model,
+            prompt=prompt,
+            system=system,
+            temperature=temperature,
+            json_mode=json_mode,
+        )
+
+        cached_response = self._get_cached_response(cache_key)
+        if cached_response:
+            return cached_response
+
+        max_retries = 3
+        base_delay = 2  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                url = "https://openrouter.ai/api/v1/chat/completions"
+
+                messages = []
+                if system:
+                    messages.append({"role": "system", "content": system})
+                messages.append({"role": "user", "content": prompt})
+
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                }
+
+                if max_tokens:
+                    payload["max_tokens"] = max_tokens
+
+                if json_mode:
+                    payload["response_format"] = {"type": "json_object"}
+
+                headers = {
+                    "Authorization": f"Bearer {Config.OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://examina.io",
+                    "X-Title": "Examina",
+                }
+
+                response = requests.post(url, json=payload, headers=headers, timeout=120)
+                response.raise_for_status()
+
+                result = response.json()
+                text = result["choices"][0]["message"]["content"]
+
+                llm_response = LLMResponse(
+                    text=text,
+                    model=model,
+                    success=True,
+                    metadata={
+                        "usage": result.get("usage"),
+                        "finish_reason": result["choices"][0].get("finish_reason"),
+                    },
+                )
+
+                # Cache successful response
+                self._save_to_cache(cache_key, llm_response)
+
+                return llm_response
+
+            except requests.exceptions.HTTPError as e:
+                error_msg = f"OpenRouter API error: {e}"
+                if e.response.status_code == 401:
+                    error_msg = "Invalid OPENROUTER_API_KEY. Check your API key."
+                    # Don't retry on auth errors
+                    return LLMResponse(text="", model=model, success=False, error=error_msg)
+                elif e.response.status_code == 429:
+                    # Rate limit - retry with backoff
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2**attempt)  # Exponential backoff
+                        print(
+                            f"  Rate limit hit, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(delay)
+                        continue
+                    else:
+                        error_msg = "Rate limit exceeded. All retries exhausted."
+                elif e.response.status_code == 400:
+                    try:
+                        error_detail = e.response.json()
+                        error_msg = f"OpenRouter API error: {error_detail}"
+                    except:
+                        error_msg = f"OpenRouter API error: {e} - {e.response.text}"
+
+                # Return error if not retrying
+                return LLMResponse(text="", model=model, success=False, error=error_msg)
+            except Exception as e:
+                return LLMResponse(
+                    text="", model=model, success=False, error=f"OpenRouter error: {str(e)}"
+                )
+
+        # Should never reach here, but just in case
+        return LLMResponse(text="", model=model, success=False, error="Max retries exceeded")
+
+    async def _openrouter_generate_async(
+        self,
+        prompt: str,
+        model: str,
+        system: Optional[str],
+        temperature: float,
+        max_tokens: Optional[int],
+        json_mode: bool,
+    ) -> LLMResponse:
+        """Generate using OpenRouter API asynchronously with automatic retry on rate limits.
+
+        Args:
+            prompt: User prompt
+            model: Model name
+            system: System prompt
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens
+            json_mode: Force JSON output
+
+        Returns:
+            LLMResponse
+        """
+        # Check for API key upfront
+        if not Config.OPENROUTER_API_KEY:
+            return LLMResponse(
+                text="",
+                model=model,
+                success=False,
+                error="OPENROUTER_API_KEY not set. Get one at https://openrouter.ai/keys",
+            )
+
+        # Check cache first
+        cache_key = self._generate_cache_key(
+            provider="openrouter",
+            model=model,
+            prompt=prompt,
+            system=system,
+            temperature=temperature,
+            json_mode=json_mode,
+        )
+
+        cached_response = self._get_cached_response(cache_key)
+        if cached_response:
+            return cached_response
+
+        if not self._session:
+            return LLMResponse(
+                text="",
+                model=model,
+                success=False,
+                error="Async session not initialized. Use 'async with LLMManager()' context manager.",
+            )
+
+        max_retries = 3
+        base_delay = 2  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                url = "https://openrouter.ai/api/v1/chat/completions"
+
+                messages = []
+                if system:
+                    messages.append({"role": "system", "content": system})
+                messages.append({"role": "user", "content": prompt})
+
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                }
+
+                if max_tokens:
+                    payload["max_tokens"] = max_tokens
+
+                if json_mode:
+                    payload["response_format"] = {"type": "json_object"}
+
+                headers = {
+                    "Authorization": f"Bearer {Config.OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://examina.io",
+                    "X-Title": "Examina",
+                }
+
+                timeout = aiohttp.ClientTimeout(total=120)
+                async with self._session.post(
+                    url, json=payload, headers=headers, timeout=timeout
+                ) as response:
+                    if response.status == 401:
+                        error_msg = "Invalid OPENROUTER_API_KEY. Check your API key."
+                        return LLMResponse(text="", model=model, success=False, error=error_msg)
+                    elif response.status == 429:
+                        # Rate limit - retry with backoff
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (2**attempt)  # Exponential backoff
+                            print(
+                                f"  Rate limit hit, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})"
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            error_msg = "Rate limit exceeded. All retries exhausted."
+                            return LLMResponse(text="", model=model, success=False, error=error_msg)
+                    elif response.status == 400:
+                        try:
+                            error_detail = await response.json()
+                            error_msg = f"OpenRouter API error: {error_detail}"
+                        except:
+                            text = await response.text()
+                            error_msg = f"OpenRouter API error: {response.status} - {text}"
+                        return LLMResponse(text="", model=model, success=False, error=error_msg)
+
+                    response.raise_for_status()
+                    result = await response.json()
+                    text = result["choices"][0]["message"]["content"]
+
+                    llm_response = LLMResponse(
+                        text=text,
+                        model=model,
+                        success=True,
+                        metadata={
+                            "usage": result.get("usage"),
+                            "finish_reason": result["choices"][0].get("finish_reason"),
+                        },
+                    )
+
+                    # Cache successful response
+                    self._save_to_cache(cache_key, llm_response)
+
+                    return llm_response
+
+            except asyncio.TimeoutError:
+                return LLMResponse(text="", model=model, success=False, error="Request timed out")
+            except aiohttp.ClientError as e:
+                return LLMResponse(
+                    text="", model=model, success=False, error=f"OpenRouter API error: {str(e)}"
+                )
+            except Exception as e:
+                return LLMResponse(
+                    text="", model=model, success=False, error=f"OpenRouter error: {str(e)}"
+                )
+
+        # Should never reach here, but just in case
+        return LLMResponse(text="", model=model, success=False, error="Max retries exceeded")
+
     def generate_with_image(
         self,
         prompt: str,
@@ -1327,7 +1618,7 @@ class LLMManager:
         Args:
             prompt: User prompt describing what to do with the image
             image_bytes: Image data as bytes (PNG, JPEG, etc.)
-            model: Vision model to use (defaults to DEEPSEEK_VISION_MODEL)
+            model: Vision model to use (defaults to provider-specific vision model)
             system: System prompt
             temperature: Sampling temperature (lower for OCR tasks)
             max_tokens: Maximum tokens to generate
@@ -1335,16 +1626,20 @@ class LLMManager:
         Returns:
             LLMResponse with generated text
         """
-        # Only DeepSeek vision is supported for now
-        if self.provider != "deepseek":
+        # Only OpenRouter and DeepSeek support vision
+        if self.provider not in ("openrouter", "deepseek"):
             return LLMResponse(
                 text="",
                 model=model or "unknown",
                 success=False,
-                error=f"Vision not supported for provider '{self.provider}'. Use 'deepseek' provider.",
+                error=f"Vision not supported for provider '{self.provider}'. Use 'openrouter' or 'deepseek' provider.",
             )
 
-        model = model or Config.DEEPSEEK_VISION_MODEL
+        # Select appropriate vision model
+        if self.provider == "openrouter":
+            model = model or Config.OPENROUTER_VISION_MODEL
+        else:
+            model = model or Config.DEEPSEEK_VISION_MODEL
 
         # Apply rate limiting before making request
         wait_time = self.rate_limiter.wait_if_needed(self.provider)
@@ -1353,9 +1648,14 @@ class LLMManager:
                 f"  [RATE LIMIT] Waiting {wait_time:.1f}s for '{self.provider}' (rate limit protection)"
             )
 
-        response = self._deepseek_generate_with_image(
-            prompt, image_bytes, model, system, temperature, max_tokens
-        )
+        if self.provider == "openrouter":
+            response = self._openrouter_generate_with_image(
+                prompt, image_bytes, model, system, temperature, max_tokens
+            )
+        else:
+            response = self._deepseek_generate_with_image(
+                prompt, image_bytes, model, system, temperature, max_tokens
+            )
 
         # Record usage if request was successful
         if response.success:
@@ -1499,6 +1799,248 @@ class LLMManager:
             except Exception as e:
                 return LLMResponse(
                     text="", model=model, success=False, error=f"DeepSeek Vision error: {str(e)}"
+                )
+
+        return LLMResponse(text="", model=model, success=False, error="Max retries exceeded")
+
+    def _openrouter_generate_with_image(
+        self,
+        prompt: str,
+        image_bytes: bytes,
+        model: str,
+        system: Optional[str],
+        temperature: float,
+        max_tokens: Optional[int],
+    ) -> LLMResponse:
+        """Generate using OpenRouter API with image input (via vision models like Gemini).
+
+        Args:
+            prompt: User prompt
+            image_bytes: Image data as bytes
+            model: Vision model name (e.g., "google/gemini-2.0-flash-001")
+            system: System prompt
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens
+
+        Returns:
+            LLMResponse
+        """
+        import base64
+        import time
+
+        # Check for API key upfront
+        if not Config.OPENROUTER_API_KEY:
+            return LLMResponse(
+                text="",
+                model=model,
+                success=False,
+                error="OPENROUTER_API_KEY not set. Get one at https://openrouter.ai/keys",
+            )
+
+        # Encode image to base64
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+        # Detect image type from bytes
+        if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            media_type = "image/png"
+        elif image_bytes[:2] == b'\xff\xd8':
+            media_type = "image/jpeg"
+        else:
+            media_type = "image/png"  # Default to PNG
+
+        max_retries = 3
+        base_delay = 2
+
+        for attempt in range(max_retries):
+            try:
+                url = "https://openrouter.ai/api/v1/chat/completions"
+
+                # Build messages with image content (OpenAI-compatible format)
+                messages = []
+                if system:
+                    messages.append({"role": "system", "content": system})
+
+                # User message with image and text
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{image_b64}"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                })
+
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                }
+
+                if max_tokens:
+                    payload["max_tokens"] = max_tokens
+
+                headers = {
+                    "Authorization": f"Bearer {Config.OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://examina.io",
+                    "X-Title": "Examina",
+                }
+
+                response = requests.post(url, json=payload, headers=headers, timeout=120)
+                response.raise_for_status()
+
+                result = response.json()
+                text = result["choices"][0]["message"]["content"]
+
+                return LLMResponse(
+                    text=text,
+                    model=model,
+                    success=True,
+                    metadata={
+                        "usage": result.get("usage"),
+                        "finish_reason": result["choices"][0].get("finish_reason"),
+                    },
+                )
+
+            except requests.exceptions.HTTPError as e:
+                error_msg = f"OpenRouter Vision API error: {e}"
+                if e.response.status_code == 401:
+                    error_msg = "Invalid OPENROUTER_API_KEY. Check your API key."
+                    return LLMResponse(text="", model=model, success=False, error=error_msg)
+                elif e.response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2**attempt)
+                        print(f"  Rate limit hit, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        error_msg = "Rate limit exceeded. All retries exhausted."
+                elif e.response.status_code == 400:
+                    try:
+                        error_detail = e.response.json()
+                        error_msg = f"OpenRouter Vision API error: {error_detail}"
+                    except:
+                        error_msg = f"OpenRouter Vision API error: {e} - {e.response.text}"
+
+                return LLMResponse(text="", model=model, success=False, error=error_msg)
+            except Exception as e:
+                return LLMResponse(
+                    text="", model=model, success=False, error=f"OpenRouter Vision error: {str(e)}"
+                )
+
+        return LLMResponse(text="", model=model, success=False, error="Max retries exceeded")
+
+    def generate_image(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+    ) -> LLMResponse:
+        """Generate an image from a text prompt using OpenRouter.
+
+        Args:
+            prompt: Text description of the image to generate
+            model: Image model to use (defaults to OPENROUTER_IMAGE_MODEL)
+
+        Returns:
+            LLMResponse with image URL in text field
+        """
+        import time
+
+        # Check for API key upfront
+        if not Config.OPENROUTER_API_KEY:
+            return LLMResponse(
+                text="",
+                model=model or "unknown",
+                success=False,
+                error="OPENROUTER_API_KEY not set. Get one at https://openrouter.ai/keys",
+            )
+
+        model = model or Config.OPENROUTER_IMAGE_MODEL
+
+        max_retries = 3
+        base_delay = 2
+
+        for attempt in range(max_retries):
+            try:
+                url = "https://openrouter.ai/api/v1/chat/completions"
+
+                # Request image generation via modalities parameter
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "modalities": ["image", "text"],
+                }
+
+                headers = {
+                    "Authorization": f"Bearer {Config.OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://examina.io",
+                    "X-Title": "Examina",
+                }
+
+                response = requests.post(url, json=payload, headers=headers, timeout=120)
+                response.raise_for_status()
+
+                result = response.json()
+                message = result["choices"][0]["message"]
+
+                # Extract image URL from response
+                # OpenRouter returns images in content array with type "image_url"
+                image_url = None
+                text_content = ""
+
+                if isinstance(message.get("content"), list):
+                    for item in message["content"]:
+                        if item.get("type") == "image_url":
+                            image_url = item.get("image_url", {}).get("url")
+                        elif item.get("type") == "text":
+                            text_content = item.get("text", "")
+                else:
+                    text_content = message.get("content", "")
+
+                return LLMResponse(
+                    text=image_url or text_content,
+                    model=model,
+                    success=image_url is not None,
+                    error=None if image_url else "No image generated",
+                    metadata={
+                        "usage": result.get("usage"),
+                        "image_url": image_url,
+                        "text": text_content,
+                    },
+                )
+
+            except requests.exceptions.HTTPError as e:
+                error_msg = f"OpenRouter Image API error: {e}"
+                if e.response.status_code == 401:
+                    error_msg = "Invalid OPENROUTER_API_KEY. Check your API key."
+                    return LLMResponse(text="", model=model, success=False, error=error_msg)
+                elif e.response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2**attempt)
+                        print(f"  Rate limit hit, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        error_msg = "Rate limit exceeded. All retries exhausted."
+                elif e.response.status_code == 400:
+                    try:
+                        error_detail = e.response.json()
+                        error_msg = f"OpenRouter Image API error: {error_detail}"
+                    except:
+                        error_msg = f"OpenRouter Image API error: {e} - {e.response.text}"
+
+                return LLMResponse(text="", model=model, success=False, error=error_msg)
+            except Exception as e:
+                return LLMResponse(
+                    text="", model=model, success=False, error=f"OpenRouter Image error: {str(e)}"
                 )
 
         return LLMResponse(text="", model=model, success=False, error="Max retries exceeded")
@@ -1653,6 +2195,8 @@ class LLMManager:
             return Config.OPENAI_API_KEY is not None and len(Config.OPENAI_API_KEY) > 0
         elif provider == "deepseek":
             return Config.DEEPSEEK_API_KEY is not None and len(Config.DEEPSEEK_API_KEY) > 0
+        elif provider == "openrouter":
+            return Config.OPENROUTER_API_KEY is not None and len(Config.OPENROUTER_API_KEY) > 0
 
         # Unknown provider
         return False

@@ -72,6 +72,16 @@ class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+    # Mathpix OCR Settings
+    MATHPIX_APP_ID = os.getenv("MATHPIX_APP_ID")
+    MATHPIX_APP_KEY = os.getenv("MATHPIX_APP_KEY")
+
+    # OpenRouter Settings
+    OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat")
+    OPENROUTER_VISION_MODEL = os.getenv("OPENROUTER_VISION_MODEL", "google/gemini-2.0-flash-001")
+    OPENROUTER_IMAGE_MODEL = os.getenv("OPENROUTER_IMAGE_MODEL", "black-forest-labs/flux-2-pro")
 
     # Anthropic Settings
     ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")  # Sonnet 4.5
@@ -205,6 +215,7 @@ class Config:
             "burst_size": 5,
         },
         "deepseek": {"requests_per_minute": None, "tokens_per_minute": None, "burst_size": 1},
+        "openrouter": {"requests_per_minute": None, "tokens_per_minute": None, "burst_size": 1},
     }
 
     @classmethod

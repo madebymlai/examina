@@ -54,6 +54,15 @@ try:
 except ImportError:
     pass
 
+# Mathpix OCR support
+MATHPIX_AVAILABLE = False
+try:
+    from config import Config
+    if Config.MATHPIX_APP_ID and Config.MATHPIX_APP_KEY:
+        MATHPIX_AVAILABLE = True
+except ImportError:
+    pass
+
 
 def get_tesseract_lang(lang_code: str) -> str:
     """Convert ISO 639-1 (en, it) to Tesseract language code (eng, ita).
@@ -361,6 +370,136 @@ class PDFProcessor:
 
         return PDFContent(
             file_path=pdf_path, total_pages=len(pages), pages=pages, metadata=metadata
+        )
+
+    def process_pdf_with_mathpix(self, pdf_path: Path) -> PDFContent:
+        """Process PDF using Mathpix OCR for high-quality text + LaTeX extraction.
+
+        Mathpix is specialized for math OCR and produces clean LaTeX output.
+
+        Args:
+            pdf_path: Path to PDF file
+
+        Returns:
+            PDFContent with Mathpix-extracted text
+
+        Raises:
+            ImportError: If Mathpix not configured
+            FileNotFoundError: If PDF not found
+        """
+        if not MATHPIX_AVAILABLE:
+            raise ImportError(
+                "Mathpix not configured. Set MATHPIX_APP_ID and MATHPIX_APP_KEY."
+            )
+
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+        import requests
+        import time
+
+        # Read PDF file
+        with open(pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+
+        # Send to Mathpix API
+        url = "https://api.mathpix.com/v3/pdf"
+        headers = {
+            "app_id": Config.MATHPIX_APP_ID,
+            "app_key": Config.MATHPIX_APP_KEY,
+        }
+
+        # Upload PDF and start conversion
+        response = requests.post(
+            url,
+            headers=headers,
+            files={"file": (pdf_path.name, pdf_bytes, "application/pdf")},
+            data={
+                "options_json": '{"math_inline_delimiters": ["$", "$"], "math_display_delimiters": ["$$", "$$"]}'
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        result = response.json()
+        pdf_id = result.get("pdf_id")
+
+        if not pdf_id:
+            raise RuntimeError(f"Mathpix upload failed: {result}")
+
+        # Poll for completion
+        status_url = f"https://api.mathpix.com/v3/pdf/{pdf_id}"
+        max_wait = 300  # 5 minutes max
+        poll_interval = 2
+        waited = 0
+
+        while waited < max_wait:
+            status_resp = requests.get(status_url, headers=headers, timeout=30)
+            status_resp.raise_for_status()
+            status = status_resp.json()
+
+            if status.get("status") == "completed":
+                break
+            elif status.get("status") == "error":
+                raise RuntimeError(f"Mathpix processing error: {status}")
+
+            time.sleep(poll_interval)
+            waited += poll_interval
+
+        if waited >= max_wait:
+            raise TimeoutError("Mathpix processing timed out")
+
+        # Get the extracted text (mmd format = markdown with math)
+        text_url = f"https://api.mathpix.com/v3/pdf/{pdf_id}.mmd"
+        text_resp = requests.get(text_url, headers=headers, timeout=30)
+        text_resp.raise_for_status()
+        full_text = text_resp.text
+
+        # Split by page markers if present, otherwise treat as single page
+        # Mathpix uses \newpage or page markers
+        page_texts = full_text.split("\\newpage") if "\\newpage" in full_text else [full_text]
+
+        pages = []
+        for page_num, page_text in enumerate(page_texts, start=1):
+            page_text = page_text.strip()
+            if not page_text:
+                continue
+
+            # Check for LaTeX patterns
+            has_latex, latex_content = self._detect_latex(page_text)
+
+            # Extract embedded images using pymupdf
+            images = self.extract_images_from_page(pdf_path, page_num) if page_num <= self.get_pdf_page_count(pdf_path) else []
+
+            pages.append(
+                PDFPage(
+                    page_number=page_num,
+                    text=page_text,
+                    images=images,
+                    has_latex=has_latex,
+                    latex_content=latex_content,
+                )
+            )
+
+        # Get metadata using pymupdf
+        doc = fitz.open(pdf_path)
+        metadata = doc.metadata or {}
+        total_pages = len(doc)
+        doc.close()
+
+        # If Mathpix returned fewer pages, pad with empty pages
+        while len(pages) < total_pages:
+            pages.append(
+                PDFPage(
+                    page_number=len(pages) + 1,
+                    text="",
+                    images=[],
+                    has_latex=False,
+                    latex_content=[],
+                )
+            )
+
+        return PDFContent(
+            file_path=pdf_path, total_pages=total_pages, pages=pages, metadata=metadata
         )
 
     def process_pdf_with_vision(
