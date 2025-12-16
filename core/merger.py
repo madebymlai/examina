@@ -131,7 +131,7 @@ def regenerate_description(
     if len(descriptions) == 1:
         return descriptions[0]
 
-    prompt = f"""Write the most representative text for a chapter subtitle:
+    prompt = f"""Write the most representative text in English for a chapter subtitle:
 
 {chr(10).join(f"- {d}" for d in descriptions)}
 

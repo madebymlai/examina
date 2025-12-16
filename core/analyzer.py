@@ -258,7 +258,7 @@ def generate_item_description(
 
     system = "You are a textbook editor."
 
-    prompt = f"""Write a chapter subtitle for these exercises:
+    prompt = f"""Write a chapter subtitle in English for these exercises:
 
 {chr(10).join(f"- {t}" for t in exercises_text)}
 
