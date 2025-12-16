@@ -53,6 +53,8 @@ class Config:
 
     # LLM Settings
     LLM_PROVIDER = os.getenv("EXAMINA_LLM_PROVIDER", "deepseek")
+    PROVIDER_PROFILE = os.getenv("EXAMINA_PROVIDER_PROFILE", "free")
+    PROVIDER_PROFILES_PATH = None  # Set in ensure_dirs()
 
     # Ollama Settings (local fallback)
     LLM_PRIMARY_MODEL = os.getenv("EXAMINA_PRIMARY_MODEL", "qwen2.5:14b")
