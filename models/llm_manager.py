@@ -1104,7 +1104,6 @@ class LLMManager:
                     messages.append({"role": "system", "content": system})
                 messages.append({"role": "user", "content": prompt})
 
-                # Reasoner model doesn't support temperature or json_mode
                 is_reasoner = model == "deepseek-reasoner"
 
                 payload = {
