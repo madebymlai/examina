@@ -115,7 +115,7 @@ class ReviewEngine:
     """Engine for exercise-based review with LLM evaluation.
 
     Usage:
-        engine = ReviewEngine(llm_manager)
+        engine = ReviewEngine(llm_manager, language="en")  # or "it", "de", etc.
 
         # Generate exercise
         exercise = engine.generate_exercise(
@@ -139,16 +139,20 @@ class ReviewEngine:
 
     # Uses LEARNING_APPROACHES from analyzer.py for consistent definitions
 
-    def __init__(self, llm: LLMInterface, use_reasoner: bool = False):
+    def __init__(self, llm: LLMInterface, language: str = "en"):
         """Initialize with LLM interface.
 
         Args:
             llm: LLM manager implementing generate() method
-            use_reasoner: If True, use deepseek-reasoner for better reasoning
+            language: Output language (ISO 639-1 code, e.g., "en", "it", "de")
         """
         self._llm = llm
-        self._use_reasoner = use_reasoner
+        self._language = language
         self._reasoner_model = "deepseek-reasoner"
+
+    def _language_instruction(self) -> str:
+        """Generate language instruction for prompts."""
+        return f"the language with ISO 639-1 code '{self._language}'"
 
     def generate_exercise(
         self,
@@ -158,8 +162,6 @@ class ReviewEngine:
         recent_exercises: Optional[list[str]] = None,
     ) -> GeneratedExercise:
         """Generate a review exercise based on knowledge item and examples.
-
-        Output is in English - caller handles translation to user's language.
 
         Args:
             knowledge_item_name: Name of the knowledge item being reviewed
@@ -177,106 +179,31 @@ class ReviewEngine:
         # Priority: exam primary, practice context
         if exam_ex:
             primary = exam_ex
-            context = practice_ex
         else:
             primary = practice_ex
-            context = []
 
         # Format examples
         primary_text = self._format_examples(primary[:3])
-        context_text = self._format_examples(context[:2]) if context else ""
 
-        # Build avoid section
-        avoid_text = ""
-        if recent_exercises:
-            avoid_text = "\n\nAVOID THESE RECENT EXERCISES (use different values/scenarios):\n"
-            for i, ex in enumerate(recent_exercises[-5:], 1):
-                avoid_text += f"{i}. {ex[:200]}...\n" if len(ex) > 200 else f"{i}. {ex}\n"
-
-        approach_desc = LEARNING_APPROACHES.get(
-            learning_approach, LEARNING_APPROACHES["conceptual"]
-        )
-
-        # R1-0528 supports system prompts
-        if self._use_reasoner:
-            system = "You are a teacher making a new exercise for a test."
-            prompt = f"""Create a similar exercise about {knowledge_item_name}.
+        system = "You are a teacher making a new exercise for a test."
+        prompt = f"""Create a similar exercise about {knowledge_item_name}.
 
 Examples:
 {primary_text}
 
-Output in English. Use LaTeX: $...$ inline, $$...$$ display.
+IMPORTANT: Output in {self._language_instruction()}. Use LaTeX: $...$ inline, $$...$$ display.
 
 Return JSON:
 {{
   "exercise_text": "the exercise",
   "expected_answer": "brief solution"
 }}"""
-        else:
-            prompt = f"""You are creating a review exercise for a student preparing for an exam.
-
-CONCEPT: {knowledge_item_name}
-TYPE: {approach_desc}
-
-REAL EXAM/PRACTICE EXAMPLES (study these carefully):
-{primary_text}
-
-{"ADDITIONAL CONTEXT:" + chr(10) + context_text if context_text else ""}
-{avoid_text}
-
-IGNORE ALL OF THE FOLLOWING IN EXAMPLES - these are NOT exercises:
-- Exam headers (NOME, COGNOME, MATRICOLA, student ID fields)
-- Exam instructions (rules about pens, calculators, paper)
-- Page numbers, dates, professor names
-- Any administrative text that isn't an actual question
-
-LOOK FOR THE ACTUAL EXERCISE which typically:
-- Asks to calculate, convert, explain, or analyze something
-- Contains mathematical notation, formulas, or specific values
-- Has a clear question or task to complete
-
-CRITICAL REQUIREMENTS:
-1. Generate in the SAME LANGUAGE as the examples above
-2. Your exercise MUST match the complexity and style of ACTUAL exercises (not headers)
-3. Use DIFFERENT numbers, variables, or scenarios - never copy
-4. Include realistic edge cases or tricks that appear in real exams
-5. If examples use specific notation/formatting, match it exactly
-6. The exercise should take 2-5 minutes to solve (not trivial, not lengthy)
-7. Match the EXACT difficulty level - if examples are hard, yours must be hard
-
-DO NOT:
-- Copy exam headers, instructions, or administrative text
-- Generate trivial "textbook example" problems
-- Make it easier than the real examples
-- Use round/obvious numbers if examples don't
-- Skip the tricky parts that make exam questions challenging
-- Change the language from the examples
-- Reference images the student cannot see ("see figure", "look at the table", "as shown")
-
-**IMAGE CONTEXT**: If examples include [IMAGE CONTEXT: ...], this describes visual content the student cannot see.
-- Use this information to understand the exercise
-- If creating a similar exercise, **describe visual content inline** instead of referencing an image
-
-LaTeX: Use $...$ for inline math, $$...$$ for display math.
-
-Return valid JSON:
-{{
-  "exercise_text": "The complete exercise with LaTeX math",
-  "expected_answer": "Brief final answer + key steps (not verbose)",
-  "exercise_type": "calculation|short_answer|explanation|scenario"
-}}"""
 
         try:
-            # Use reasoner model with system prompt
-            if self._use_reasoner:
-                response = self._llm.generate(prompt, model=self._reasoner_model, system=system)
-            else:
-                response = self._llm.generate(prompt, json_mode=True)
-            # Handle LLMResponse object or string
+            response = self._llm.generate(prompt, model=self._reasoner_model, system=system)
             response_text = response.text if hasattr(response, "text") else str(response)
             return self._parse_exercise_response(response_text, knowledge_item_name)
         except Exception as e:
-            # Fallback: create simple exercise
             import logging
 
             logging.getLogger(__name__).warning(f"Exercise generation failed: {e}")
@@ -299,17 +226,17 @@ Return valid JSON:
             exercise_text: The exercise question
             expected_answer: Expected solution
             student_answer: Student's submitted answer
-            exercise_type: Type of exercise (optional, not used by R1)
+            exercise_type: Type of exercise (unused, kept for API compatibility)
 
         Returns:
             ReviewEvaluation with score, feedback, and correct answer
         """
-        # R1-0528 supports system prompts
-        if self._use_reasoner:
-            system = "You are a teacher correcting your student's work."
-            prompt = f"""Exercise: {exercise_text}
+        system = "You are a teacher correcting your student's work."
+        prompt = f"""Exercise: {exercise_text}
 Expected: {expected_answer}
 Student: {student_answer}
+
+IMPORTANT: Respond in {self._language_instruction()}.
 
 Return JSON:
 {{
@@ -317,67 +244,12 @@ Return JSON:
   "is_correct": true/false,
   "feedback": "brief feedback"
 }}"""
-        else:
-            prompt = f"""You are evaluating a student's answer to an exam review exercise.
-
-EXERCISE:
-{exercise_text}
-
-EXPECTED ANSWER:
-{expected_answer}
-
-STUDENT'S ANSWER:
-{student_answer}
-
-EVALUATION RULES:
-
-1. LANGUAGE: Evaluate in the same language as the exercise. If exercise is Italian, respond in Italian.
-
-2. EQUIVALENT ANSWERS - Accept these as correct:
-   - Different notation: λ=3, lambda=3, \\lambda=3 are equivalent
-   - Different order: "3 and 5" = "5 and 3" for unordered answers
-   - Simplified vs unsimplified: 2/4 = 1/2 = 0.5
-   - Different units if convertible: 100cm = 1m
-   - Minor typos in text answers if meaning is clear
-
-3. PARTIAL CREDIT RULES:
-   - 90-100%: Fully correct, possibly minor notation differences
-   - 70-89%: Correct approach and final answer, minor errors in steps
-   - 50-69%: Correct approach but wrong final answer, OR correct answer but wrong/missing steps
-   - 30-49%: Partially correct approach, significant errors
-   - 10-29%: Shows some understanding but mostly wrong
-   - 0-9%: Completely wrong or blank
-
-4. EXERCISE TYPE CONSIDERATIONS:
-   - calculation: Steps matter. Correct answer with no steps = max 70%
-   - explanation: Clarity and completeness matter. Key concepts must be mentioned.
-   - short_answer: Focus on correctness of final answer
-   - scenario: Reasoning matters as much as conclusion
-
-5. BE FAIR:
-   - Don't penalize for extra correct information
-   - Don't penalize for different valid approaches
-   - Don't penalize for formatting differences
-
-Return valid JSON:
-{{
-  "score": 0.0-1.0,
-  "is_correct": true/false (true if score >= 0.7),
-  "feedback": "Brief explanation of what was right/wrong",
-  "correct_answer": "The expected answer for reference"
-}}"""
 
         try:
-            # Use reasoner model with system prompt
-            if self._use_reasoner:
-                response = self._llm.generate(prompt, model=self._reasoner_model, system=system)
-            else:
-                response = self._llm.generate(prompt, json_mode=True)
-            # Handle LLMResponse object or string
+            response = self._llm.generate(prompt, model=self._reasoner_model, system=system)
             response_text = response.text if hasattr(response, "text") else str(response)
             return self._parse_evaluation_response(response_text, expected_answer, student_answer)
         except Exception as e:
-            # Fallback evaluation
             import logging
 
             logging.getLogger(__name__).warning(f"Answer evaluation failed: {e}")
