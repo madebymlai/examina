@@ -5,18 +5,17 @@ Pipeline Test Suite for examina-core.
 Tests parsing, exercise splitting, and knowledge item extraction
 across diverse exam PDFs from multiple academic domains.
 
-Supports two processing modes (matching cloud tier behavior):
-- Parallel (default, Pro-like): Each PDF analyzed independently, cross-batch merge at end
-- Sequential (--sequential, Free-like): Each PDF sees previous items, inline merge
+Defaults (ON):
+- Active learning: ML classifier reduces LLM calls 70-90%
+- Persist: Training data saved to .examina/training_cache.json
+- Analyze depth: KI names + descriptions (not just exercise counts)
 
 Usage:
-    python test_pipeline.py --smoke              # 1 PDF per course (~2 min)
-    python test_pipeline.py --course ADE         # All PDFs in one course
-    python test_pipeline.py --course ADE --full  # Full pipeline with cross-batch merge
-    python test_pipeline.py --all                # All 43 PDFs (~15-30 min)
-    python test_pipeline.py --pdf path/to.pdf    # Single PDF
-    python test_pipeline.py --golden             # Regression tests with exact counts
-    python test_pipeline.py --sequential         # Free-tier mode (each PDF sees previous)
+    python test_pipeline.py --smoke              # Quick test with new defaults
+    python test_pipeline.py --smoke --benchmark  # Compare with/without AL
+    python test_pipeline.py --smoke --html r.html  # Generate HTML report
+    python test_pipeline.py --course ADE --full  # Full pipeline with merging
+    python test_pipeline.py --golden             # Regression tests
     python test_pipeline.py --help               # Full usage guide
 """
 
@@ -1921,20 +1920,29 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --smoke                     Quick test (1 PDF per course)
-  %(prog)s --golden                    Run regression tests (exact counts)
-  %(prog)s --course ADE                Test all PDFs in ADE course
-  %(prog)s --pdf path.pdf --full       Single PDF with internal merge
-  %(prog)s --course SO --full          Pro mode: parallel + cross-batch merge
-  %(prog)s --course SO --full --sequential   Free mode: sequential, inline merge
-  %(prog)s --course SO --full --independent  Internal merge only, no cross-batch
-  %(prog)s --smoke --save              Save results permanently
-  %(prog)s --rerun-failed              Rerun only failed tests
+  %(prog)s --smoke                     Quick test (AL on, persist on, analyze depth)
+  %(prog)s --smoke --benchmark         Compare with/without active learning
+  %(prog)s --smoke --html report.html  Generate HTML report
+  %(prog)s --course ADE --full         Full pipeline with merging
+  %(prog)s --golden                    Run regression tests
+  %(prog)s --smoke --no-active-learning   Disable ML, use pure LLM
+  %(prog)s --smoke --no-persist        Cold start (don't use cached training)
+  %(prog)s --load-training data.json   Warm start from exported training
+
+Defaults (can be disabled with --no-X):
+  --with-active-learning   ML classifier reduces LLM calls 70-90%
+  --persist                Auto-save training to .examina/training_cache.json
+  --analyze                Default depth (KI names + descriptions)
+
+Training Data:
+  --load-training PATH     Load training from JSON (warm start)
+  --save-training PATH     Export training to JSON after run
+  --persist                Auto-save/load from cache (default ON)
 
 Processing Modes (--full with multiple PDFs):
-  --parallel (default)   Pro-like: Independent PDFs + cross-batch merge at end
-  --sequential           Free-like: Each PDF sees previous items inline
-  --independent          No cross-batch merge, internal merge only
+  --parallel (default)     Pro-like: Independent PDFs + cross-batch merge
+  --sequential             Free-like: Each PDF sees previous items inline
+  --independent            Internal merge only, no cross-batch
         """,
     )
 
