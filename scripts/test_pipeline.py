@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.analyzer import ExerciseAnalyzer, generate_item_description
 from core.exercise_splitter import ExerciseSplitter
-from core.merger import get_canonical_name, group_items
+from core.merger import classify_items, get_canonical_name
 from core.pdf_processor import PDFProcessor
 from models.llm_manager import LLMManager
 
@@ -396,24 +396,27 @@ class PipelineTester:
                     }
                 )
 
-            # INTERNAL MERGE: Find duplicates within this PDF
+            # INTERNAL MERGE: Find duplicates within this PDF using classify_items
             if len(items) >= 2:
-                group_indices = group_items(items, self.llm)
+                # classify_items returns (groups, assignments)
+                final_groups, _ = classify_items(items, [], self.llm)
 
-                for indices in group_indices:
-                    group_items_list = [items[i] for i in indices if i < len(items)]
+                # Find groups with multiple items (merged)
+                for group in final_groups:
+                    group_items_list = group.get("items", [])
                     if len(group_items_list) < 2:
                         continue
+
                     group_names = [item["name"] for item in group_items_list]
-                    canonical = get_canonical_name(group_names, self.llm)
+                    canonical = group.get("name", get_canonical_name(group_names, self.llm))
 
                     members = []
                     for item in group_items_list:
                         members.append(
                             {
                                 "name": item["name"],
-                                "description": item["description"],
-                                "exercises": item["exercises"],
+                                "description": item.get("description", ""),
+                                "exercises": item.get("exercises", []),
                             }
                         )
 
@@ -427,27 +430,42 @@ class PipelineTester:
 
             # SEQUENTIAL MODE: Merge against existing items from previous PDFs
             if existing_items and len(items) >= 1:
-                # Combine new items with existing for cross-batch check
-                combined = existing_items + items
-                cross_groups = group_items(combined, self.llm)
+                # Classify new items against existing groups
+                existing_groups = [
+                    {
+                        "id": i,
+                        "name": item["name"],
+                        "description": item.get("description", ""),
+                        "items": [item],
+                    }
+                    for i, item in enumerate(existing_items)
+                ]
 
-                # Filter to groups that span old and new items
-                boundary = len(existing_items)
-                for indices in cross_groups:
-                    has_old = any(i < boundary for i in indices)
-                    has_new = any(i >= boundary for i in indices)
+                final_groups, _ = classify_items(items, existing_groups, self.llm)
+
+                # Find groups that contain items from both old and new
+                for group in final_groups:
+                    group_items_list = group.get("items", [])
+                    if len(group_items_list) < 2:
+                        continue
+
+                    # Check if spans old and new PDFs
+                    old_names = {item["name"] for item in existing_items}
+                    new_names = {item["name"] for item in items}
+                    group_names = [item["name"] for item in group_items_list]
+
+                    has_old = any(name in old_names for name in group_names)
+                    has_new = any(name in new_names for name in group_names)
+
                     if has_old and has_new:
-                        # This is a cross-batch merge
-                        group_items_list = [combined[i] for i in indices if i < len(combined)]
-                        group_names = [item["name"] for item in group_items_list]
-                        canonical = get_canonical_name(group_names, self.llm)
+                        canonical = group.get("name", get_canonical_name(group_names, self.llm))
 
                         members = []
                         for item in group_items_list:
                             members.append(
                                 {
                                     "name": item["name"],
-                                    "description": item["description"],
+                                    "description": item.get("description", ""),
                                     "pdf": item.get("pdf", "?"),
                                 }
                             )
@@ -633,15 +651,13 @@ class TestRunner:
 
         try:
             self.tester._init_llm()
-            group_indices = group_items(items, self.tester.llm)
 
-            if not group_indices:
-                if not self.args.quiet:
-                    print("  No cross-PDF duplicates found")
-                return
+            # Use classify_items to find groups
+            final_groups, _ = classify_items(items, [], self.tester.llm)
 
-            for indices in group_indices:
-                group_items_list = [items[i] for i in indices if i < len(items)]
+            found_cross_pdf = False
+            for group in final_groups:
+                group_items_list = group.get("items", [])
                 if len(group_items_list) < 2:
                     continue
 
@@ -650,8 +666,9 @@ class TestRunner:
                 if len(pdfs_in_group) < 2:
                     continue  # Internal merge, already handled
 
+                found_cross_pdf = True
                 group_names = [item["name"] for item in group_items_list]
-                canonical = get_canonical_name(group_names, self.tester.llm)
+                canonical = group.get("name", get_canonical_name(group_names, self.tester.llm))
 
                 members = []
                 for item in group_items_list:
@@ -675,6 +692,9 @@ class TestRunner:
                     print(f"  {bold(canonical)}")
                     for m in members:
                         print(f"    ← {m['name']} ({m['pdf']})")
+
+            if not found_cross_pdf and not self.args.quiet:
+                print("  No cross-PDF duplicates found")
 
         except Exception as e:
             print(red(f"  Cross-batch merge failed: {e}"))
