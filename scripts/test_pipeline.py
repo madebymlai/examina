@@ -146,6 +146,8 @@ class TestResult:
     exercise_details: list = field(default_factory=list)
     skill_groups: list = field(default_factory=list)  # Internal merge results
     knowledge_items: list = field(default_factory=list)  # KIs for cross-batch merge
+    categories: list = field(default_factory=list)  # Discovered categories
+    active_learning_stats: dict = field(default_factory=dict)  # ML stats
 
 
 @dataclass
@@ -401,9 +403,18 @@ class PipelineTester:
                 # classify_items returns (groups, assignments)
                 final_groups, _ = classify_items(items, [], self.llm)
 
+                # Collect categories discovered
+                categories_seen = set()
+
                 # Find groups with multiple items (merged)
                 for group in final_groups:
                     group_items_list = group.get("items", [])
+
+                    # Track categories
+                    group_category = group.get("category")
+                    if group_category:
+                        categories_seen.add(group_category)
+
                     if len(group_items_list) < 2:
                         continue
 
@@ -416,6 +427,7 @@ class PipelineTester:
                             {
                                 "name": item["name"],
                                 "description": item.get("description", ""),
+                                "category": item.get("category", ""),
                                 "exercises": item.get("exercises", []),
                             }
                         )
@@ -423,10 +435,14 @@ class PipelineTester:
                     result.skill_groups.append(
                         {
                             "canonical": canonical,
+                            "description": group.get("description", ""),
+                            "category": group_category,
                             "members": members,
                             "type": "internal",
                         }
                     )
+
+                result.categories = list(categories_seen)
 
             # SEQUENTIAL MODE: Merge against existing items from previous PDFs
             if existing_items and len(items) >= 1:
@@ -917,6 +933,10 @@ class TestRunner:
                 sol_marker = " [+sol]" if ex["has_solution"] else ""
                 print(f'{prefix}{num}{sol_marker}: "{ex["text_preview"]}"')
 
+        # Show categories discovered
+        if result.categories:
+            print(f"\n  {cyan('Categories')}: {', '.join(sorted(result.categories))}")
+
         # Show skill groups (--full mode)
         if result.skill_groups:
             # Separate internal vs cross-batch-inline groups
@@ -927,31 +947,32 @@ class TestRunner:
 
             if internal_groups:
                 print(
-                    f"\n  {cyan('Internal Merge')} ({len(internal_groups)} groups within this PDF):"
+                    f"\n  {cyan('Merged Groups')} ({len(internal_groups)} within this PDF):"
                 )
                 for group in internal_groups:
                     canonical = group["canonical"]
-                    print(f"    {bold(canonical)}")
+                    category = group.get("category", "")
+                    description = group.get("description", "")
+
+                    # Header with category
+                    cat_label = f" [{category}]" if category else ""
+                    print(f"    {bold(canonical)}{dim(cat_label)}")
+
+                    # Description
+                    if description:
+                        print(f"      {dim(self._truncate_output(description, 70))}")
+
+                    # Members
                     for member in group["members"]:
                         name = member["name"]
+                        member_desc = member.get("description", "")
                         print(f"      ← {name}")
-                        for ex in member.get("exercises", []):
-                            num = ex.get("number", "?")
-                            if ex.get("is_sub"):
-                                ctx = ex.get("context", "")
-                                txt = ex.get("text", "")
-                                if ctx:
-                                    print(f"        [{num}] {dim(self._truncate_output(ctx, 50))}")
-                                    print(f'             "{self._truncate_output(txt, 50)}"')
-                                else:
-                                    print(f'        [{num}] "{self._truncate_output(txt, 50)}"')
-                            else:
-                                txt = ex.get("text", "")
-                                print(f'        [{num}] "{self._truncate_output(txt, 60)}"')
+                        if member_desc and self.args.verbose:
+                            print(f"        {dim(self._truncate_output(member_desc, 60))}")
 
             if cross_inline_groups:
                 print(
-                    f"\n  {yellow('Cross-batch Inline')} ({len(cross_inline_groups)} groups vs previous PDFs):"
+                    f"\n  {yellow('Cross-PDF Merges')} ({len(cross_inline_groups)} groups):"
                 )
                 for group in cross_inline_groups:
                     canonical = group["canonical"]
@@ -961,9 +982,17 @@ class TestRunner:
                         pdf = member.get("pdf", "?")
                         print(f"      ← {name} ({pdf})")
 
-        # Show knowledge items count
+        # Show knowledge items with descriptions
         if result.knowledge_items:
-            print(f"\n  Knowledge items: {len(result.knowledge_items)}")
+            print(f"\n  {cyan('Knowledge Items')} ({len(result.knowledge_items)}):")
+            for item in result.knowledge_items:
+                name = item.get("name", "?")
+                desc = item.get("description", "")
+                cat = item.get("category", "")
+                cat_label = f" [{cat}]" if cat else ""
+                print(f"    • {name}{dim(cat_label)}")
+                if desc and self.args.verbose:
+                    print(f"      {dim(self._truncate_output(desc, 65))}")
 
     def _truncate_output(self, text: str, max_len: int = 60) -> str:
         """Truncate text for output."""
