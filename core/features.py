@@ -6,6 +6,7 @@ Key feature: embedding_similarity using sentence transformers.
 """
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -23,8 +24,9 @@ def get_embedding_model():
     return _embedding_model
 
 
+@lru_cache(maxsize=1024)
 def compute_embedding(text: str) -> np.ndarray:
-    """Compute sentence embedding for text."""
+    """Compute sentence embedding for text. Cached to avoid recomputation."""
     if not text or not text.strip():
         return np.zeros(384)  # MiniLM embedding size
     model = get_embedding_model()
