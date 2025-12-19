@@ -8,29 +8,50 @@ across diverse exam PDFs from multiple academic domains.
 Defaults (ON):
 - Active learning: ML classifier reduces LLM calls 70-90%
 - Persist: Training data saved to .examina/training_cache.json
-- Analyze depth: KI names + descriptions (not just exercise counts)
+- Timeout: 300s per PDF (prevents hangs)
 
-Usage:
-    python test_pipeline.py --smoke              # Quick test with new defaults
-    python test_pipeline.py --smoke --benchmark  # Compare with/without AL
-    python test_pipeline.py --smoke --html r.html  # Generate HTML report
-    python test_pipeline.py --course ADE --full  # Full pipeline with merging
-    python test_pipeline.py --golden             # Regression tests
-    python test_pipeline.py --help               # Full usage guide
+Quick Start:
+    python test_pipeline.py --smoke              # Quick test (1 PDF/course)
+    python test_pipeline.py --smoke --full -j 4  # Parallel processing
+    python test_pipeline.py --all --sample 10    # Random 10 PDFs
+
+CI Integration:
+    python test_pipeline.py --smoke --junit results.xml  # JUnit XML output
+    python test_pipeline.py --compare old.json new.json  # Detect regressions
+
+Reports:
+    python test_pipeline.py --smoke --html report.html   # HTML report (auto-opens)
+    python test_pipeline.py --smoke --show-cost          # LLM cost estimate
+
+Full Usage:
+    python test_pipeline.py --help
 """
 
 import argparse
 import json
+import random
 import signal
 import sys
 import textwrap
+import threading
 import time
+import webbrowser
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from xml.dom import minidom
+from xml.etree.ElementTree import Element, SubElement, tostring
 
 import yaml
+
+# Optional: tqdm for progress bar
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
 
 # Add examina to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -66,6 +87,14 @@ COURSES = {
     "PC-EXAMS": "Programmazione Concorrente",
     "PHYSICS-EXAMS": "Physics 101",
     "SO-EXAMS": "Sistemi Operativi",
+}
+
+# LLM costs per 1M tokens (USD) - DeepSeek pricing
+# https://api-docs.deepseek.com/quick_start/pricing/
+LLM_COSTS = {
+    "deepseek-chat": {"input": 0.28, "input_cached": 0.028, "output": 0.42},
+    "deepseek-reasoner": {"input": 0.28, "input_cached": 0.028, "output": 0.42},
+    "default": {"input": 0.28, "input_cached": 0.028, "output": 0.42},
 }
 
 GOLDEN_TESTS_FILE = Path(__file__).parent / "golden-tests.yaml"
@@ -167,6 +196,7 @@ class TestSummary:
     passed: int = 0
     failed: int = 0
     errors: int = 0
+    timeouts: int = 0
     warnings: list = field(default_factory=list)
     results: list = field(default_factory=list)
     duration: float = 0.0
@@ -350,7 +380,7 @@ class PipelineTester:
                         "has_solution": bool(ex.solution),
                         "text_preview": self._truncate(ex.text, 100),
                         "text_full": ex.text,  # Full text for analyzer
-                        "context": getattr(ex, "parent_context", "") or "",
+                        "context": getattr(ex, "exercise_context", "") or "",
                     }
                 )
 
@@ -712,56 +742,120 @@ class TestRunner:
         total = len(pdfs)
         prev_course = None
 
-        for i, (pdf_path, course_folder) in enumerate(pdfs):
-            if self._interrupted:
-                break
+        # Determine if we should show progress bar
+        show_progress = (
+            TQDM_AVAILABLE and
+            not self.args.quiet and
+            not self.args.verbose and
+            not getattr(self.args, 'no_progress', False) and
+            sys.stdout.isatty()
+        )
 
-            course_name = self.tester._get_course_name(course_folder)
+        pbar = None
+        if show_progress:
+            pbar = tqdm(
+                total=total,
+                desc="Testing",
+                unit="pdf",
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+            )
 
-            # Cross-batch merge when course changes (parallel mode only)
-            if prev_course and prev_course != course_folder and self.args.full:
-                if not is_sequential and not is_independent:
+        # Check for parallel mode (only for --full with -j > 1)
+        use_parallel = (
+            getattr(self.args, 'jobs', 1) > 1 and
+            self.args.full and
+            not is_sequential  # Sequential mode requires ordered processing
+        )
+
+        try:
+            if use_parallel:
+                # Parallel mode: process PDFs concurrently
+                if not self.args.quiet:
+                    print(f"Running with {self.args.jobs} parallel workers...")
+                self._run_parallel(pdfs, pbar)
+            else:
+                # Sequential mode
+                for i, (pdf_path, course_folder) in enumerate(pdfs):
+                    if self._interrupted:
+                        break
+
+                    course_name = self.tester._get_course_name(course_folder)
+
+                    # Cross-batch merge when course changes (parallel mode only)
+                    if prev_course and prev_course != course_folder and self.args.full:
+                        if not is_sequential and not is_independent:
+                            self._run_cross_batch_merge(prev_course)
+
+                    prev_course = course_folder
+
+                    # Update progress (tqdm or text)
+                    if pbar:
+                        pbar.set_postfix({
+                            "pdf": pdf_path.name[:20],
+                            "pass": self.summary.passed,
+                            "fail": self.summary.failed,
+                        })
+                    else:
+                        self._print_progress(i, total, pdf_path)
+
+                    # Accumulate and reset cache stats for per-PDF tracking
+                    if self.tester.llm:
+                        stats = self.tester.llm.get_cache_stats()
+                        self._total_llm_hits += stats["hits"]
+                        self._total_llm_misses += stats["misses"]
+                        self.tester.llm.reset_cache_stats()
+
+                    # Run appropriate test level (with timeout)
+                    timeout = getattr(self.args, 'timeout', 300)
+                    try:
+                        if self.args.parse:
+                            result = self._run_with_timeout(
+                                self.tester.test_parse, timeout, pdf_path
+                            )
+                        elif self.args.full:
+                            # Sequential mode: pass existing items for inline merge
+                            existing_items = None
+                            if is_sequential:
+                                existing_items = self._course_items.get(course_folder, [])
+                            result = self._run_with_timeout(
+                                self.tester.test_full, timeout, pdf_path, course_name, existing_items
+                            )
+
+                            # Accumulate items for cross-batch (parallel) or next PDF (sequential)
+                            if result.status == "PASS" and result.knowledge_items:
+                                if course_folder not in self._course_items:
+                                    self._course_items[course_folder] = []
+                                self._course_items[course_folder].extend(result.knowledge_items)
+                        elif self.args.analyze:
+                            result = self._run_with_timeout(
+                                self.tester.test_analyze, timeout, pdf_path, course_name
+                            )
+                        else:  # Default: split
+                            result = self._run_with_timeout(
+                                self.tester.test_split, timeout, pdf_path, course_name
+                            )
+                    except TimeoutError as e:
+                        result = TestResult(
+                            pdf_path=str(pdf_path),
+                            status="TIMEOUT",
+                            error=str(e),
+                            duration=float(timeout),
+                        )
+
+                    self._record_result(result)
+                    self._times.append(result.duration)
+
+                    if pbar:
+                        pbar.update(1)
+                    elif not self.args.quiet:
+                        self._print_result(result)
+
+                # Final cross-batch merge for last course (sequential only)
+                if self.args.full and prev_course and not is_sequential and not is_independent:
                     self._run_cross_batch_merge(prev_course)
-
-            prev_course = course_folder
-            self._print_progress(i, total, pdf_path)
-
-            # Accumulate and reset cache stats for per-PDF tracking
-            if self.tester.llm:
-                stats = self.tester.llm.get_cache_stats()
-                self._total_llm_hits += stats["hits"]
-                self._total_llm_misses += stats["misses"]
-                self.tester.llm.reset_cache_stats()
-
-            # Run appropriate test level
-            if self.args.parse:
-                result = self.tester.test_parse(pdf_path)
-            elif self.args.full:
-                # Sequential mode: pass existing items for inline merge
-                existing_items = None
-                if is_sequential:
-                    existing_items = self._course_items.get(course_folder, [])
-                result = self.tester.test_full(pdf_path, course_name, existing_items)
-
-                # Accumulate items for cross-batch (parallel) or next PDF (sequential)
-                if result.status == "PASS" and result.knowledge_items:
-                    if course_folder not in self._course_items:
-                        self._course_items[course_folder] = []
-                    self._course_items[course_folder].extend(result.knowledge_items)
-            elif self.args.analyze:
-                result = self.tester.test_analyze(pdf_path, course_name)
-            else:  # Default: split
-                result = self.tester.test_split(pdf_path, course_name)
-
-            self._record_result(result)
-            self._times.append(result.duration)
-
-            if not self.args.quiet:
-                self._print_result(result)
-
-        # Final cross-batch merge for last course (parallel mode only)
-        if self.args.full and prev_course and not is_sequential and not is_independent:
-            self._run_cross_batch_merge(prev_course)
+        finally:
+            if pbar:
+                pbar.close()
 
         # Capture final PDF's LLM stats
         if self.tester.llm:
@@ -783,6 +877,10 @@ class TestRunner:
         # Generate HTML report if requested
         if getattr(self.args, 'html', None):
             self._generate_html_report(self.args.html)
+
+        # Generate JUnit XML report if requested
+        if getattr(self.args, 'junit', None):
+            self._generate_junit_report(self.args.junit)
 
         # Save training data if requested or persist is enabled
         self._save_training_data()
@@ -851,6 +949,102 @@ class TestRunner:
 
         return results
 
+    def _run_with_timeout(self, func, timeout: int, *args, **kwargs):
+        """Run function with timeout. Returns result or raises TimeoutError."""
+        if timeout <= 0:
+            return func(*args, **kwargs)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func, *args, **kwargs)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                raise TimeoutError(f"Exceeded {timeout}s timeout")
+
+    def _run_parallel(self, pdfs: list, pbar=None) -> list:
+        """Process PDFs in parallel using ThreadPoolExecutor."""
+        results = []
+        n_jobs = min(self.args.jobs, len(pdfs))
+
+        # Thread-local storage for tester instances
+        thread_local = threading.local()
+
+        def get_thread_tester():
+            """Get or create per-thread PipelineTester instance."""
+            if not hasattr(thread_local, 'tester'):
+                thread_local.tester = PipelineTester(
+                    lang=self.tester.lang,
+                    verbose=False,  # Disable verbose in threads
+                    quiet=True,
+                    debug=False,
+                    use_active_learning=self.tester.use_active_learning,
+                    show_features=self.tester.show_features,
+                    training_path=self.tester.training_path,
+                )
+                # Share the active classifier (thread-safe with locks)
+                thread_local.tester.active_classifier = self.tester.active_classifier
+            return thread_local.tester
+
+        def process_pdf(pdf_path, course_folder):
+            """Process a single PDF in a thread."""
+            tester = get_thread_tester()
+            course_name = tester._get_course_name(course_folder)
+            return tester.test_full(pdf_path, course_name)
+
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+            # Submit all tasks
+            future_to_pdf = {
+                executor.submit(process_pdf, pdf, course): (pdf, course)
+                for pdf, course in pdfs
+            }
+
+            # Collect results as they complete
+            timeout = getattr(self.args, 'timeout', 300)
+            timeout_val = timeout if timeout > 0 else None
+
+            for future in as_completed(future_to_pdf):
+                pdf_path, course_folder = future_to_pdf[future]
+                try:
+                    result = future.result(timeout=timeout_val)
+                    results.append(result)
+                    self._record_result(result)
+                    self._times.append(result.duration)
+
+                    # Update progress bar if using tqdm
+                    if pbar:
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            "pass": self.summary.passed,
+                            "fail": self.summary.failed,
+                        })
+
+                except FuturesTimeoutError:
+                    # Timeout result
+                    result = TestResult(
+                        pdf_path=str(pdf_path),
+                        status="TIMEOUT",
+                        error=f"Exceeded {timeout}s timeout",
+                        duration=float(timeout),
+                    )
+                    results.append(result)
+                    self._record_result(result)
+                    if pbar:
+                        pbar.update(1)
+
+                except Exception as e:
+                    # Record error result
+                    result = TestResult(
+                        pdf_path=str(pdf_path),
+                        status="ERROR",
+                        error=str(e),
+                    )
+                    results.append(result)
+                    self._record_result(result)
+                    if pbar:
+                        pbar.update(1)
+
+        return results
+
     def _reset_benchmark_stats(self):
         """Reset stats between benchmark runs."""
         self._total_llm_hits = 0
@@ -910,6 +1104,119 @@ class TestRunner:
         print(f"\nKnowledge Items:")
         print(f"  Without AL: {kis_without}")
         print(f"  With AL:    {kis_with}")
+
+    def run_compare(self) -> int:
+        """Compare two result files and show regressions/improvements."""
+        old_path, new_path = self.args.compare
+
+        # Load files
+        try:
+            with open(old_path) as f:
+                old_data = json.load(f)
+            with open(new_path) as f:
+                new_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"{red('Error')}: {e}")
+            return 1
+
+        print(bold("=== COMPARISON ===\n"))
+        print(f"Old: {old_path}")
+        print(f"New: {new_path}\n")
+
+        # Compare summaries
+        old_sum = old_data.get("summary", {})
+        new_sum = new_data.get("summary", {})
+
+        print(bold("Summary:"))
+        self._compare_metric("Passed", old_sum.get("passed", 0), new_sum.get("passed", 0))
+        self._compare_metric("Failed", old_sum.get("failed", 0), new_sum.get("failed", 0))
+        self._compare_metric("Duration", old_sum.get("duration", 0), new_sum.get("duration", 0), suffix="s")
+
+        # Find regressions and improvements
+        old_by_pdf = {Path(r.get("pdf", "")).name: r for r in old_data.get("results", [])}
+        new_by_pdf = {Path(r.get("pdf", "")).name: r for r in new_data.get("results", [])}
+
+        regressions = []
+        improvements = []
+
+        for pdf_name, new_result in new_by_pdf.items():
+            old_result = old_by_pdf.get(pdf_name)
+            if not old_result:
+                continue
+
+            old_status = old_result.get("status", "")
+            new_status = new_result.get("status", "")
+
+            if old_status == "PASS" and new_status != "PASS":
+                regressions.append({
+                    "pdf": pdf_name,
+                    "old_status": old_status,
+                    "new_status": new_status,
+                    "error": new_result.get("error"),
+                })
+            elif old_status != "PASS" and new_status == "PASS":
+                improvements.append({
+                    "pdf": pdf_name,
+                    "old_status": old_status,
+                    "new_status": new_status,
+                })
+
+        # Print regressions
+        if regressions:
+            print(f"\n{red('Regressions')} ({len(regressions)}):")
+            for r in regressions:
+                print(f"  {red('✗')} {r['pdf']}: {r['old_status']} → {r['new_status']}")
+                if r.get("error"):
+                    print(f"      Error: {r['error'][:60]}...")
+        else:
+            print(f"\n{green('No regressions')}")
+
+        # Print improvements
+        if improvements:
+            print(f"\n{green('Improvements')} ({len(improvements)}):")
+            for r in improvements:
+                print(f"  {green('✓')} {r['pdf']}: {r['old_status']} → {r['new_status']}")
+
+        # Compare KI counts by course
+        print(f"\n{bold('KI Changes:')}")
+        old_kis = self._count_kis_by_course(old_data.get("results", []))
+        new_kis = self._count_kis_by_course(new_data.get("results", []))
+
+        all_courses = set(old_kis.keys()) | set(new_kis.keys())
+        for course in sorted(all_courses):
+            old_count = old_kis.get(course, 0)
+            new_count = new_kis.get(course, 0)
+            self._compare_metric(f"  {course}", old_count, new_count, suffix=" KIs")
+
+        return 1 if regressions else 0
+
+    def _compare_metric(self, name: str, old: float, new: float, suffix: str = ""):
+        """Print comparison of a metric."""
+        diff = new - old
+        if diff > 0:
+            diff_str = yellow(f"+{diff:.1f}" if isinstance(diff, float) and not diff.is_integer() else f"+{int(diff)}")
+        elif diff < 0:
+            diff_str = green(f"{diff:.1f}" if isinstance(diff, float) and not diff.is_integer() else f"{int(diff)}")
+        else:
+            diff_str = dim("0")
+
+        old_str = f"{old:.1f}" if isinstance(old, float) and not old.is_integer() else str(int(old) if isinstance(old, float) else old)
+        new_str = f"{new:.1f}" if isinstance(new, float) and not new.is_integer() else str(int(new) if isinstance(new, float) else new)
+
+        print(f"  {name}: {old_str} → {new_str}{suffix} ({diff_str})")
+
+    def _count_kis_by_course(self, results: list) -> dict[str, int]:
+        """Count KIs by course from results."""
+        counts: dict[str, int] = {}
+        for r in results:
+            pdf_path = r.get("pdf", "")
+            # Extract course from path
+            for course in COURSES.keys():
+                if course in pdf_path:
+                    ki_count = len(r.get("exercise_details", []))
+                    counts[course] = counts.get(course, 0) + ki_count
+                    break
+        return counts
 
     def _run_cross_batch_merge(self, course_folder: str):
         """Run cross-batch merge for accumulated items in a course (parallel mode)."""
@@ -1109,6 +1416,18 @@ class TestRunner:
                         if not self._should_skip(pdf):
                             pdfs.append((pdf, folder))
 
+        # Apply sampling if requested
+        sample_n = getattr(self.args, 'sample', None)
+        if sample_n and sample_n > 0 and len(pdfs) > sample_n:
+            original_count = len(pdfs)
+            seed = getattr(self.args, 'seed', None)
+            if seed is not None:
+                random.seed(seed)
+            pdfs = random.sample(pdfs, sample_n)
+            if not self.args.quiet:
+                print(f"Sampled {sample_n} PDFs from {original_count} total" +
+                      (f" (seed={seed})" if seed is not None else ""))
+
         return pdfs
 
     def _should_skip(self, pdf_path: Path) -> bool:
@@ -1294,6 +1613,8 @@ class TestRunner:
             self.summary.passed += 1
         elif result.status == "FAIL":
             self.summary.failed += 1
+        elif result.status == "TIMEOUT":
+            self.summary.timeouts += 1
         else:
             self.summary.errors += 1
 
@@ -1346,6 +1667,10 @@ class TestRunner:
                 f"LLM calls: {total_llm} ({self._total_llm_hits} cached, {self._total_llm_misses} new, {hit_rate:.0f}% hit rate)"
             )
 
+        # Cost estimate if requested
+        if getattr(self.args, 'show_cost', False) and self._total_llm_misses > 0:
+            self._print_cost_estimate()
+
         # Active learning summary stats
         total_al = self._total_al_llm_calls + self._total_al_predictions + self._total_al_transitive
         if total_al > 0:
@@ -1385,6 +1710,36 @@ class TestRunner:
 
         if self._interrupted:
             print(yellow("\n(Interrupted - partial results)"))
+
+    def _print_cost_estimate(self):
+        """Print estimated LLM API cost based on call counts."""
+        # Estimated average tokens per LLM call (conservative estimates)
+        # Based on typical exam analysis prompts/responses
+        AVG_INPUT_TOKENS = 1500   # ~1.5K input (prompt + context)
+        AVG_OUTPUT_TOKENS = 500   # ~500 output (structured response)
+
+        # Get pricing (default to deepseek-chat)
+        rates = LLM_COSTS.get("default", {"input": 0.28, "output": 0.42})
+
+        # Calculate estimated tokens
+        llm_calls = self._total_llm_misses  # Only non-cached calls cost money
+        est_input_tokens = llm_calls * AVG_INPUT_TOKENS
+        est_output_tokens = llm_calls * AVG_OUTPUT_TOKENS
+
+        # Calculate cost (per 1M tokens)
+        input_cost = est_input_tokens / 1_000_000 * rates["input"]
+        output_cost = est_output_tokens / 1_000_000 * rates["output"]
+        total_cost = input_cost + output_cost
+
+        # Cost per PDF (for non-cached PDFs)
+        cost_per_pdf = total_cost / max(self.summary.total, 1)
+
+        print(f"\n{cyan('Cost Estimate')} (DeepSeek pricing):")
+        print(f"  LLM calls (non-cached): {llm_calls}")
+        print(f"  Est. input tokens:  ~{est_input_tokens:,} (${input_cost:.4f})")
+        print(f"  Est. output tokens: ~{est_output_tokens:,} (${output_cost:.4f})")
+        print(f"  {bold('Total estimate:')} ${total_cost:.4f}")
+        print(f"  Per PDF: ${cost_per_pdf:.4f}")
 
     def _print_dry_run(self, pdfs: list):
         """Print what would be run without running."""
@@ -1537,6 +1892,71 @@ document.querySelectorAll('.collapsible').forEach(el => {{
 
         Path(output_path).write_text(html)
         print(f"\nHTML report saved to: {output_path}")
+
+        # Auto-open in browser (unless disabled or headless)
+        if not getattr(self.args, 'no_open', False) and sys.stdout.isatty():
+            try:
+                webbrowser.open(f"file://{Path(output_path).absolute()}")
+            except Exception:
+                pass  # Silently fail if can't open browser
+
+    def _generate_junit_report(self, output_path: str):
+        """Generate JUnit XML report for CI integration."""
+        # Group results by course
+        by_course: dict[str, list] = {}
+        for result in self.summary.results:
+            course = "unknown"
+            for c in COURSES.keys():
+                if c in result.pdf_path:
+                    course = c
+                    break
+            if course not in by_course:
+                by_course[course] = []
+            by_course[course].append(result)
+
+        # Build XML
+        testsuites = Element("testsuites")
+        testsuites.set("name", "Pipeline Tests")
+        testsuites.set("tests", str(self.summary.total))
+        testsuites.set("failures", str(self.summary.failed))
+        testsuites.set("errors", str(self.summary.errors + self.summary.timeouts))
+        testsuites.set("time", f"{self.summary.duration:.1f}")
+
+        for course, results in sorted(by_course.items()):
+            suite = SubElement(testsuites, "testsuite")
+            suite.set("name", course)
+            suite.set("tests", str(len(results)))
+            suite.set("failures", str(sum(1 for r in results if r.status == "FAIL")))
+            suite.set("errors", str(sum(1 for r in results if r.status in ("ERROR", "TIMEOUT"))))
+            suite.set("time", f"{sum(r.duration for r in results):.1f}")
+
+            for result in results:
+                testcase = SubElement(suite, "testcase")
+                testcase.set("name", Path(result.pdf_path).name)
+                testcase.set("classname", course)
+                testcase.set("time", f"{result.duration:.1f}")
+
+                if result.status == "FAIL":
+                    failure = SubElement(testcase, "failure")
+                    failure.set("message", result.error or "Test failed")
+                    failure.text = result.error or ""
+                elif result.status == "ERROR":
+                    error = SubElement(testcase, "error")
+                    error.set("message", result.error or "Error occurred")
+                    error.text = result.error or ""
+                elif result.status == "TIMEOUT":
+                    error = SubElement(testcase, "error")
+                    error.set("message", "Timeout")
+                    error.text = result.error or "PDF processing timed out"
+
+        # Pretty print
+        xml_str = minidom.parseString(tostring(testsuites)).toprettyxml(indent="  ")
+        # Remove XML declaration duplicate and extra blank lines
+        lines = [line for line in xml_str.split("\n") if line.strip()]
+        xml_str = "\n".join(lines)
+
+        Path(output_path).write_text(xml_str)
+        print(f"JUnit XML report saved to: {output_path}")
 
     def _html_summary_section(self) -> str:
         """Generate summary stats section."""
@@ -1920,29 +2340,32 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --smoke                     Quick test (AL on, persist on, analyze depth)
-  %(prog)s --smoke --benchmark         Compare with/without active learning
-  %(prog)s --smoke --html report.html  Generate HTML report
-  %(prog)s --course ADE --full         Full pipeline with merging
+  %(prog)s --smoke                     Quick test (1 PDF/course)
+  %(prog)s --smoke --full -j 4         Full pipeline, 4 parallel workers
+  %(prog)s --all --sample 10           Random sample of 10 PDFs
+  %(prog)s --course ADE --full         All PDFs in one course
   %(prog)s --golden                    Run regression tests
-  %(prog)s --smoke --no-active-learning   Disable ML, use pure LLM
-  %(prog)s --smoke --no-persist        Cold start (don't use cached training)
-  %(prog)s --load-training data.json   Warm start from exported training
 
-Defaults (can be disabled with --no-X):
-  --with-active-learning   ML classifier reduces LLM calls 70-90%
-  --persist                Auto-save training to .examina/training_cache.json
-  --analyze                Default depth (KI names + descriptions)
+Performance:
+  -j N, --jobs N           Parallel PDF processing (requires --full)
+  --sample N               Random N PDFs (--seed for reproducibility)
+  --timeout SEC            Per-PDF timeout (default: 300s, 0=none)
 
-Training Data:
-  --load-training PATH     Load training from JSON (warm start)
-  --save-training PATH     Export training to JSON after run
-  --persist                Auto-save/load from cache (default ON)
+Output:
+  --html PATH              HTML report (auto-opens in browser)
+  --junit PATH             JUnit XML for CI (GitHub Actions, Jenkins)
+  --json / --txt           Alternative formats with --save
+  --show-cost              Estimate LLM costs (DeepSeek pricing)
 
-Processing Modes (--full with multiple PDFs):
-  --parallel (default)     Pro-like: Independent PDFs + cross-batch merge
-  --sequential             Free-like: Each PDF sees previous items inline
-  --independent            Internal merge only, no cross-batch
+CI/CD:
+  --compare OLD NEW        Detect regressions (exit 1 if any)
+  --junit PATH             Standard JUnit XML output
+  --timeout SEC            Prevent stuck tests
+
+Active Learning:
+  --with-active-learning   ML reduces LLM calls 70-90%% (default ON)
+  --persist                Auto-save training (default ON)
+  --load-training PATH     Warm start from exported data
         """,
     )
 
@@ -2041,8 +2464,15 @@ Processing Modes (--full with multiple PDFs):
     # Output options
     parser.add_argument("--save", action="store_true", help="Save results to test-results/ (HTML by default)")
     parser.add_argument("--html", metavar="PATH", help="Generate HTML report at specified path")
+    parser.add_argument("--no-open", action="store_true", help="Don't auto-open HTML report in browser")
     parser.add_argument("--json", action="store_true", help="Output as JSON instead of HTML (with --save)")
     parser.add_argument("--txt", action="store_true", help="Output as plain text instead of HTML (with --save)")
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("OLD", "NEW"),
+        help="Compare two JSON result files and show regressions",
+    )
     parser.add_argument("--failures-only", action="store_true", help="Show only failed tests")
     parser.add_argument("--timing", action="store_true", help="Show timing per PDF")
     parser.add_argument("--lang", default="en", help="Language for analysis (default: en)")
@@ -2050,10 +2480,49 @@ Processing Modes (--full with multiple PDFs):
         "--dry-run", action="store_true", help="Show what would run without running"
     )
     parser.add_argument("--skip", action="append", metavar="PDF", help="Skip specific PDF(s)")
+    parser.add_argument(
+        "-j", "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Concurrent PDF processing threads (default: 1, requires --full)",
+    )
+    parser.add_argument("--no-progress", action="store_true", help="Disable progress bar")
     parser.add_argument("-q", "--quiet", action="store_true", help="Summary only")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show full exercise details")
     parser.add_argument("--debug", action="store_true", help="Show all LLM cache messages")
     parser.add_argument("--no-color", action="store_true", help="Disable colored output")
+
+    # New v3 features
+    parser.add_argument(
+        "--sample",
+        type=int,
+        metavar="N",
+        help="Randomly sample N PDFs from the test set",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        metavar="N",
+        help="Random seed for --sample (for reproducibility)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        metavar="SEC",
+        help="Timeout per PDF in seconds (default: 300, 0=no limit)",
+    )
+    parser.add_argument(
+        "--junit",
+        metavar="PATH",
+        help="Export results to JUnit XML format (for CI)",
+    )
+    parser.add_argument(
+        "--show-cost",
+        action="store_true",
+        help="Show estimated LLM API costs (DeepSeek pricing)",
+    )
 
     args = parser.parse_args()
 
@@ -2086,7 +2555,9 @@ def main():
 
     runner = TestRunner(args)
 
-    if getattr(args, 'benchmark', False):
+    if getattr(args, 'compare', None):
+        exit_code = runner.run_compare()
+    elif getattr(args, 'benchmark', False):
         exit_code = runner.run_benchmark()
     elif args.golden:
         exit_code = runner.run_golden()
