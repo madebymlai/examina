@@ -290,10 +290,10 @@ Return JSON:
                             pass
                         break
 
-        # Fallback: use response as exercise text
+        # Fallback: don't use raw response (may contain JSON structure)
         return GeneratedExercise(
-            exercise_text=response[:500] if response else f"Explain {knowledge_item_name}.",
-            expected_answer="See reference material.",
+            exercise_text=f"Explain the key concepts of {knowledge_item_name}.",
+            expected_answer="A clear explanation of the main concepts and their applications.",
             exercise_type="explanation",
         )
 
