@@ -265,11 +265,24 @@ Return JSON:
             pass
 
         # Try to find JSON object in response (handles markdown code blocks)
-        # Find the outermost { } pair by counting braces
+        # Find the outermost { } pair, ignoring braces inside quoted strings
         start_idx = response.find("{")
         if start_idx != -1:
             brace_count = 0
+            in_string = False
+            escape_next = False
             for i, char in enumerate(response[start_idx:], start_idx):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if char == "\\":
+                    escape_next = True
+                    continue
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
                 if char == "{":
                     brace_count += 1
                 elif char == "}":
