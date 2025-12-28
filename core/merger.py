@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from models.llm_manager import LLMManager
@@ -19,6 +20,14 @@ if TYPE_CHECKING:
     from core.active_learning import ActiveClassifier
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_category(name: str) -> str:
+    """Normalize category name to snake_case."""
+    normalized = name.strip().lower()
+    normalized = normalized.replace(" ", "_").replace("-", "_")
+    normalized = re.sub(r"_+", "_", normalized)
+    return normalized
 
 
 def assign_category(
@@ -69,7 +78,7 @@ Or: {{"category": "new sub-topic name (lowercase)", "is_new": true}}"""
 
         if response and response.text:
             result = json.loads(response.text)
-            category = result.get("category", existing_categories[0])
+            category = normalize_category(result.get("category", existing_categories[0]))
             is_new = result.get("is_new", False)
 
             # Validate existing category
@@ -107,13 +116,13 @@ Return JSON: {{"category": "sub-topic name (lowercase)"}}"""
 
         if response and response.text:
             result = json.loads(response.text)
-            return result.get("category", "General")
+            return normalize_category(result.get("category", "General"))
 
-        return "General"
+        return "general"
 
     except Exception as e:
         logger.warning(f"Category generation failed: {e}")
-        return "General"
+        return "general"
 
 
 def classify_item(
@@ -258,8 +267,8 @@ def classify_items(
     ]
     group_by_id = {g["id"]: g for g in groups}
 
-    # Get existing categories
-    existing_categories = list(set(g["category"] for g in groups if g.get("category")))
+    # Get existing categories (normalized to snake_case for matching)
+    existing_categories = list(set(normalize_category(g["category"]) for g in groups if g.get("category")))
 
     # LLM classify function for active learning fallback
     def llm_classify_fn(item: dict, candidate_groups: list[dict]) -> dict:
@@ -275,8 +284,8 @@ def classify_items(
             if item_category not in existing_categories:
                 existing_categories.append(item_category)
 
-        # Step 2: Filter groups to same category
-        same_category_groups = [g for g in groups if g.get("category") == item_category]
+        # Step 2: Filter groups to same category (normalize for comparison)
+        same_category_groups = [g for g in groups if normalize_category(g.get("category") or "") == item_category]
 
         # Step 3: Classify within category (using active learning if available)
         if same_category_groups:
