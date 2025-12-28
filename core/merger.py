@@ -50,7 +50,7 @@ def assign_category(
 Existing sub-topics:
 {categories_text}
 
-Item: {item.get('description', item.get('name', ''))}
+Item: {item.get('description', item.get('display_name', item.get('name', '')))}
 
 Pick the best fitting broad sub-topic, or suggest NEW if none fit.
 NEW must be broad (1-2 words), not a course name.
@@ -90,7 +90,7 @@ def _generate_category(item: dict, llm: LLMManager) -> str:
     """Generate category for first item in course."""
     prompt = f"""What broad sub-topic does this item belong to?
 
-Item: {item.get('description', item.get('name', ''))}
+Item: {item.get('description', item.get('display_name', item.get('name', '')))}
 
 Return a broad sub-topic (1-2 words), NOT the course or subject name.
 
@@ -143,9 +143,9 @@ def classify_item(
     if not existing_groups:
         return {"group_id": None, "is_new": True, "confidence": 1.0}
 
-    # Format groups for prompt
+    # Format groups for prompt (use display_name if available for LLM readability)
     groups_text = "\n".join(
-        f"{i + 1}. {g['name']} - {g['description']}"
+        f"{i + 1}. {g.get('display_name', g['name'])} - {g['description']}"
         for i, g in enumerate(existing_groups)
     )
 
@@ -249,6 +249,7 @@ def classify_items(
         {
             "id": g["id"],
             "name": g["name"],
+            "display_name": g.get("display_name", g["name"]),  # Preserve for LLM
             "description": g["description"],
             "category": g.get("category"),
             "items": g.get("items", []).copy(),
@@ -298,6 +299,7 @@ def classify_items(
             new_group = {
                 "id": item["id"],
                 "name": item["name"],
+                "display_name": item.get("display_name", item["name"]),
                 "description": item["description"],
                 "category": item_category,
                 "items": [item],
@@ -324,8 +326,8 @@ def classify_items(
         if not group or len(group["items"]) < 2:
             continue
 
-        # Get canonical name
-        item_names = [item["name"] for item in group["items"]]
+        # Get canonical name (use display_name for LLM readability)
+        item_names = [item.get("display_name", item["name"]) for item in group["items"]]
         group["name"] = get_canonical_name(item_names, llm)
 
         # Regenerate description
