@@ -34,6 +34,7 @@ def assign_category(
     item: dict,
     existing_categories: list[str],
     llm: LLMManager,
+    display_categories: list[str] | None = None,
 ) -> tuple[str, bool]:
     """
     Assign item to existing category or create new one.
@@ -42,8 +43,9 @@ def assign_category(
 
     Args:
         item: Dict with 'name' and 'description'
-        existing_categories: List of category names already in this course
+        existing_categories: List of category names (snake_case) for matching
         llm: LLMManager instance
+        display_categories: List of category names (Title Case) for LLM prompt
 
     Returns:
         Tuple of (category_name, is_new)
@@ -52,7 +54,9 @@ def assign_category(
         # First item - generate category from description
         return _generate_category(item, llm), True
 
-    categories_text = "\n".join(f"- {c}" for c in existing_categories)
+    # Use display_categories for prompt (Title Case for LLM understanding)
+    prompt_categories = display_categories if display_categories else existing_categories
+    categories_text = "\n".join(f"- {c}" for c in prompt_categories)
 
     prompt = f"""Assign this item to a broad sub-topic.
 
@@ -267,8 +271,9 @@ def classify_items(
     ]
     group_by_id = {g["id"]: g for g in groups}
 
-    # Get existing categories (normalized to snake_case for matching)
-    existing_categories = list(set(normalize_category(g["category"]) for g in groups if g.get("category")))
+    # Get existing categories - Title Case for display, snake_case for matching
+    display_categories = list(set(g["category"] for g in groups if g.get("category")))
+    existing_categories = [normalize_category(c) for c in display_categories]
 
     # LLM classify function for active learning fallback
     def llm_classify_fn(item: dict, candidate_groups: list[dict]) -> dict:
@@ -279,7 +284,7 @@ def classify_items(
         # Step 1: Assign category (if not already set)
         item_category = item.get("category")
         if not item_category:
-            item_category, _ = assign_category(item, existing_categories, llm)
+            item_category, is_new = assign_category(item, existing_categories, llm, display_categories)
             item["category"] = item_category
             if item_category not in existing_categories:
                 existing_categories.append(item_category)
