@@ -1498,8 +1498,7 @@ class TestRunner:
                     if ex.get("context"):
                         print(f'{prefix}Context: "{ex["context"][:60]}..."')
 
-                sol_marker = " [+sol]" if ex["has_solution"] else ""
-                print(f'{prefix}{num}{sol_marker}: "{ex["text_preview"]}"')
+                print(f'{prefix}{num}: "{ex["text_preview"]}"')
 
         # Show categories discovered
         if result.categories:
@@ -2137,9 +2136,8 @@ document.querySelectorAll('.collapsible').forEach(el => {{
                     for parent_num, subs in sorted(exercises_by_parent.items()):
                         printed_parents.add(parent_num)
                         parent_ex = parent_info.get(parent_num, {})
-                        sol = " [+sol]" if parent_ex.get("has_solution") else ""
 
-                        lines.append(f"  EXERCISE {parent_num}:{sol}")
+                        lines.append(f"  EXERCISE {parent_num}:")
                         # Show parent context if available
                         if parent_ex.get("context"):
                             ctx = (
@@ -2150,8 +2148,7 @@ document.querySelectorAll('.collapsible').forEach(el => {{
                             lines.append(f"    {ctx}")
                         # Show sub-questions
                         for sub in subs:
-                            sub_sol = " [+sol]" if sub["has_solution"] else ""
-                            prefix = f"    - {sub['number']}:{sub_sol} "
+                            prefix = f"    - {sub['number']}: "
                             wrapped = textwrap.fill(
                                 sub["text_preview"],
                                 width=78,
@@ -2172,8 +2169,7 @@ document.querySelectorAll('.collapsible').forEach(el => {{
                         parent_num = parent_ex["number"]
                         if parent_num in printed_parents:
                             continue  # Already printed as grouped
-                        sol = " [+sol]" if parent_ex["has_solution"] else ""
-                        prefix = f"  - Ex {parent_num}:{sol} "
+                        prefix = f"  - Ex {parent_num}: "
                         wrapped = textwrap.fill(
                             parent_ex["text_preview"],
                             width=78,
@@ -2218,9 +2214,8 @@ document.querySelectorAll('.collapsible').forEach(el => {{
                         # Show exercises under this KI
                         for ex in exercises:
                             num = ex.get("number", "?")
-                            sol = " [+sol]" if ex.get("has_solution") else ""
                             preview = ex.get("text_preview", "")[:50]
-                            lines.append(f"      [{num}]{sol} {preview}...")
+                            lines.append(f"      [{num}] {preview}...")
                 lines.append("")
 
             # Mode: full - KIs grouped by category + skill groups
