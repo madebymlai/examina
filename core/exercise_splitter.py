@@ -269,7 +269,7 @@ If no clear exercise divisions:
 
     try:
         llm_response = llm_manager.generate(
-            prompt.format(text=text_sample[:30000]),
+            prompt.format(text=text_sample),
             temperature=0.0,
             json_mode=True,
         )
@@ -1380,8 +1380,9 @@ class ExerciseSplitter:
             return []
 
         # Step 2: Detect pattern/markers with LLM
+        # No char limit - page limit on upload already caps doc size
         logger.info("Detecting exercise pattern with LLM...")
-        detection = _detect_exercises(full_text[:30000], llm_manager)
+        detection = _detect_exercises(full_text, llm_manager)
 
         if not detection:
             # No detection - try regex fallback, then page-based
