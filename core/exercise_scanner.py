@@ -24,7 +24,12 @@ try:
 except ImportError:
     PDF2IMAGE_AVAILABLE = False
 
-from core.pdf import PDFProcessor
+try:
+    import fitz  # PyMuPDF
+
+    FITZ_AVAILABLE = True
+except ImportError:
+    FITZ_AVAILABLE = False
 
 __all__ = [
     "extract_exercises",
@@ -45,8 +50,16 @@ def get_pdf_page_count(pdf_path: Path) -> int:
 
     Raises:
         FileNotFoundError: If PDF not found
+        ImportError: If PyMuPDF not installed
     """
-    return PDFProcessor().get_pdf_page_count(pdf_path)
+    if not FITZ_AVAILABLE:
+        raise ImportError("PyMuPDF required. Install: pip install pymupdf")
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+    doc = fitz.open(pdf_path)
+    count = len(doc)
+    doc.close()
+    return count
 
 
 class VLMExtractionError(Exception):
