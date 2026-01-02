@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from core.pdf_processor import PDFContent, PDFPage
+from core.scanner import PDFContent, PDFPage
 
 
 @dataclass

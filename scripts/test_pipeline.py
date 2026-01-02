@@ -60,7 +60,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.analyzer import ExerciseAnalyzer, generate_item_description
 from core.exercise_splitter import ExerciseSplitter
 from core.merger import classify_items, get_canonical_name
-from core.pdf_processor import PDFProcessor
+from core.scanner import PDFProcessor
 from models.llm_manager import LLMManager
 
 # Optional: Active learning imports (may not be installed)

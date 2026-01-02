@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from core.pdf_processor import (
+from core.scanner import (
     PDFContent,
     PDFProcessor,
     extract_exercises,
@@ -132,39 +132,47 @@ class ExerciseSplitter:
         """Initialize exercise splitter."""
         self._pdf_processor = PDFProcessor()
 
-    def split_pdf(
+    def extract(
         self,
-        pdf_path: Path,
+        file_path: Path,
         course_code: str,
     ) -> List[Exercise]:
-        """Split PDF into exercises using VLM extraction.
+        """Unified extraction pipeline: VLM for OCR + splitting, DeepSeek for context.
 
-        This is the primary method for exercise extraction. Uses VLM to:
-        - See actual visual layout (not just OCR text)
-        - Detect exercise boundaries accurately
-        - Extract hierarchical structure (parents + sub-questions)
-        - Generate context summaries
+        Handles both PDFs and images:
+        - VLM: OCR, exercise boundaries, hierarchical structure
+        - DeepSeek: context summaries for parents/standalone
 
         Args:
-            pdf_path: Path to PDF file
+            file_path: Path to PDF or image file
             course_code: Course code for ID generation
 
         Returns:
             List of Exercise objects
 
         Raises:
-            FileNotFoundError: If PDF not found
+            FileNotFoundError: If file not found
             VLMExtractionError: If VLM extraction fails
         """
-        if not pdf_path.exists():
-            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Render all pages
-        page_count = self._pdf_processor.get_pdf_page_count(pdf_path)
-        page_images = []
-        for page_num in range(1, page_count + 1):
-            img_bytes = render_page_to_image(pdf_path, page_num, dpi=150)
-            page_images.append(img_bytes)
+        # Check if image or PDF
+        suffix = file_path.suffix.lower()
+        is_image = suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+        # Get page images
+        if is_image:
+            # Single image file
+            page_images = [file_path.read_bytes()]
+            total_pages = 1
+        else:
+            # PDF: render all pages
+            total_pages = self._pdf_processor.get_pdf_page_count(file_path)
+            page_images = []
+            for page_num in range(1, total_pages + 1):
+                img_bytes = render_page_to_image(file_path, page_num, dpi=150)
+                page_images.append(img_bytes)
 
         # Extract exercises using VLM
         vlm_exercises = extract_exercises(page_images)
@@ -184,7 +192,7 @@ class ExerciseSplitter:
                 sub_marker = ex_num.rsplit(".", 1)[1]
 
             exercise_id = _generate_exercise_id(
-                course_code, pdf_path.name, ex_num, i
+                course_code, file_path.name, ex_num, i
             )
 
             exercises.append(
@@ -197,7 +205,7 @@ class ExerciseSplitter:
                     image_data=[],  # VLM describes images, doesn't extract bytes
                     has_latex="$" in ex["text"],
                     latex_content=None,
-                    source_pdf=pdf_path.name,
+                    source_pdf=file_path.name,
                     parent_exercise_number=parent_num,
                     sub_question_marker=sub_marker,
                     is_sub_question=is_sub,
@@ -228,7 +236,7 @@ class ExerciseSplitter:
         Returns:
             List of Exercise objects
         """
-        return self.split_pdf(pdf_content.file_path, course_code)
+        return self.extract(pdf_content.file_path, course_code)
 
     def split_pdf_content(
         self,
@@ -244,7 +252,7 @@ class ExerciseSplitter:
         Returns:
             List of Exercise objects
         """
-        return self.split_pdf(pdf_content.file_path, course_code)
+        return self.extract(pdf_content.file_path, course_code)
 
     def validate_exercise(self, exercise: Exercise) -> bool:
         """Validate if an exercise has content.
