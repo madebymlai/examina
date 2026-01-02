@@ -9,9 +9,13 @@ NoteSplitter detects document structure: headers, chapters, numbered sections.
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
-from core.pdf import PDFContent, PDFPage
+from core.note_scanner import scan_notes
+
+if TYPE_CHECKING:
+    from core.pdf import PDFContent, PDFPage
 
 
 @dataclass
@@ -78,7 +82,7 @@ class NoteSplitter:
         self.section_counter = 0
 
     def split_notes(
-        self, text: str, pages: Optional[List[PDFPage]] = None, source_pdf: str = "notes.pdf"
+        self, text: str, pages: Optional[List["PDFPage"]] = None, source_pdf: str = "notes.pdf"
     ) -> List[NoteSection]:
         """
         Split note text into sections by detecting headers.
@@ -149,9 +153,30 @@ class NoteSplitter:
 
         return sections
 
-    def split_pdf_content(self, pdf_content: PDFContent) -> List[NoteSection]:
+    def split_pdf(self, pdf_path: Path) -> List[NoteSection]:
+        """Split a PDF into sections using VLM-based OCR.
+
+        This is the primary method for processing notes.
+        Uses note_scanner for OCR, then splits on headers.
+
+        Args:
+            pdf_path: Path to PDF file
+
+        Returns:
+            List of NoteSection objects
         """
-        Split PDF content into sections.
+        # Use VLM for OCR
+        full_text = scan_notes(pdf_path)
+
+        # Split into sections
+        return self.split_notes(
+            text=full_text,
+            pages=None,  # VLM gives us raw text, no page objects
+            source_pdf=pdf_path.name,
+        )
+
+    def split_pdf_content(self, pdf_content: "PDFContent") -> List[NoteSection]:
+        """Split PDF content into sections (backward compat).
 
         Args:
             pdf_content: Extracted PDF content
@@ -221,7 +246,7 @@ class NoteSplitter:
         return title.strip()
 
     def _get_page_number(
-        self, text_position: int, full_text: str, pages: Optional[List[PDFPage]]
+        self, text_position: int, full_text: str, pages: Optional[List["PDFPage"]]
     ) -> int:
         """Determine page number from text position."""
         if not pages:
@@ -237,7 +262,7 @@ class NoteSplitter:
 
         return pages[-1].page_number if pages else 1
 
-    def _split_by_pages(self, pages: List[PDFPage], source_pdf: str) -> List[NoteSection]:
+    def _split_by_pages(self, pages: List["PDFPage"], source_pdf: str) -> List[NoteSection]:
         """
         Fallback: split by pages when no headers found.
         Groups consecutive pages with similar content.
