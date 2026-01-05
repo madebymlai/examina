@@ -218,3 +218,236 @@ class TestQualityGates:
 
         # LLM says "match" but features say "no way" - suspicious
         assert should_add_to_training(features, 0.95) is False
+
+
+class TestCatBoostActiveLearner:
+    """Test the CatBoost active learner."""
+
+    def test_catboost_available(self):
+        from core.active_learning import CATBOOST_AVAILABLE
+
+        # This test documents whether CatBoost is installed in test environment
+        # It should pass regardless of whether CatBoost is available
+        assert isinstance(CATBOOST_AVAILABLE, bool)
+
+    def test_fit_and_predict(self):
+        import pytest
+
+        from core.active_learning import CATBOOST_AVAILABLE
+
+        if not CATBOOST_AVAILABLE:
+            pytest.skip("CatBoost not installed")
+
+        from core.active_learning import CatBoostActiveLearner
+
+        learner = CatBoostActiveLearner(n_estimators=3)
+
+        # Create training data (need enough for 3-fold CV calibration)
+        X = np.array([
+            [0.9, 0.8, 0.7, 0.9, 1.0, 1.0, 0.8],  # Match
+            [0.85, 0.75, 0.65, 0.85, 1.0, 1.0, 0.75],  # Match
+            [0.88, 0.78, 0.68, 0.88, 1.0, 0.0, 0.78],  # Match
+            [0.92, 0.82, 0.72, 0.92, 1.0, 1.0, 0.82],  # Match
+            [0.2, 0.1, 0.1, 0.5, 0.0, 0.0, 0.2],  # No match
+            [0.15, 0.05, 0.05, 0.4, 0.0, 0.0, 0.15],  # No match
+            [0.18, 0.08, 0.08, 0.45, 0.0, 0.0, 0.18],  # No match
+            [0.22, 0.12, 0.12, 0.55, 0.0, 0.0, 0.22],  # No match
+        ])
+        y = np.array([1, 1, 1, 1, 0, 0, 0, 0])
+
+        learner.fit(X, y)
+
+        assert learner.is_fitted is True
+
+        # Test prediction on similar item
+        test_match = np.array([[0.88, 0.78, 0.68, 0.88, 1.0, 1.0, 0.78]])
+        proba = learner.predict_proba(test_match)
+
+        assert proba[0][1] > 0.5  # Should predict match
+
+    def test_uncertainty_probability_std(self):
+        import pytest
+
+        from core.active_learning import CATBOOST_AVAILABLE
+
+        if not CATBOOST_AVAILABLE:
+            pytest.skip("CatBoost not installed")
+
+        from core.active_learning import CatBoostActiveLearner
+
+        learner = CatBoostActiveLearner(n_estimators=3)
+
+        # Without fitting, everything should be uncertain
+        X = np.array([[0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.5]])
+        uncertainty = learner.uncertainty(X)
+
+        assert uncertainty[0] == 1.0  # Max uncertainty when not fitted
+
+    def test_fit_with_early_stopping(self):
+        import pytest
+
+        from core.active_learning import CATBOOST_AVAILABLE
+
+        if not CATBOOST_AVAILABLE:
+            pytest.skip("CatBoost not installed")
+
+        from core.active_learning import CatBoostActiveLearner
+
+        learner = CatBoostActiveLearner(n_estimators=3)
+
+        # Create larger training data for early stopping test
+        np.random.seed(42)
+        n_samples = 50
+        X_match = np.random.uniform(0.7, 1.0, (n_samples // 2, 7))
+        X_no_match = np.random.uniform(0.0, 0.3, (n_samples // 2, 7))
+        X = np.vstack([X_match, X_no_match])
+        y = np.array([1] * (n_samples // 2) + [0] * (n_samples // 2))
+
+        learner.fit_with_early_stopping(X, y)
+
+        assert learner.is_fitted is True
+        assert len(learner.committee) == 3
+
+    def test_teach_incremental(self):
+        import pytest
+
+        from core.active_learning import CATBOOST_AVAILABLE
+
+        if not CATBOOST_AVAILABLE:
+            pytest.skip("CatBoost not installed")
+
+        from core.active_learning import CatBoostActiveLearner
+
+        learner = CatBoostActiveLearner(n_estimators=3)
+
+        # Initial training data
+        X = np.array([
+            [0.9, 0.8, 0.7, 0.9, 1.0, 1.0, 0.8],
+            [0.85, 0.75, 0.65, 0.85, 1.0, 1.0, 0.75],
+            [0.88, 0.78, 0.68, 0.88, 1.0, 0.0, 0.78],
+            [0.2, 0.1, 0.1, 0.5, 0.0, 0.0, 0.2],
+            [0.15, 0.05, 0.05, 0.4, 0.0, 0.0, 0.15],
+            [0.18, 0.08, 0.08, 0.45, 0.0, 0.0, 0.18],
+        ])
+        y = np.array([1, 1, 1, 0, 0, 0])
+
+        learner.fit(X, y)
+        initial_samples = len(learner.X_train)
+
+        # Teach new samples
+        new_X = np.array([[0.91, 0.81, 0.71, 0.91, 1.0, 1.0, 0.81]])
+        new_y = np.array([1])
+        learner.teach(new_X, new_y)
+
+        assert len(learner.X_train) == initial_samples + 1
+
+
+class TestFactoryFunction:
+    """Test the active learner factory function."""
+
+    def test_factory_returns_learner(self):
+        from core.active_learning import ActiveLearner, create_active_learner
+
+        learner = create_active_learner(n_estimators=3, prefer_catboost=False)
+        assert isinstance(learner, ActiveLearner)
+
+    def test_factory_prefers_catboost_when_available(self):
+        from core.active_learning import (
+            CATBOOST_AVAILABLE,
+            ActiveLearner,
+            create_active_learner,
+        )
+
+        learner = create_active_learner(n_estimators=3, prefer_catboost=True)
+
+        if CATBOOST_AVAILABLE:
+            from core.active_learning import CatBoostActiveLearner
+
+            assert isinstance(learner, CatBoostActiveLearner)
+        else:
+            assert isinstance(learner, ActiveLearner)
+
+
+class TestBackwardCompatibility:
+    """Test that existing training data format still works."""
+
+    def test_load_existing_training_data(self):
+        from core.active_learning import ActiveClassifier
+
+        classifier = ActiveClassifier()
+
+        # Simulate existing training data format
+        existing_data = [
+            {"features": [0.9, 0.8, 0.7, 0.9, 1.0, 1.0, 0.8], "label": 1},
+            {"features": [0.85, 0.75, 0.65, 0.85, 1.0, 1.0, 0.75], "label": 1},
+            {"features": [0.2, 0.1, 0.1, 0.5, 0.0, 0.0, 0.2], "label": 0},
+            {"features": [0.15, 0.05, 0.05, 0.4, 0.0, 0.0, 0.15], "label": 0},
+        ]
+
+        # Should not raise
+        classifier.load_training_data(existing_data)
+
+        assert classifier.stats.training_samples == 4
+
+    def test_export_import_roundtrip(self):
+        from core.active_learning import ActiveClassifier
+
+        classifier = ActiveClassifier()
+
+        existing_data = [
+            {"features": [0.9, 0.8, 0.7, 0.9, 1.0, 1.0, 0.8], "label": 1},
+            {"features": [0.2, 0.1, 0.1, 0.5, 0.0, 0.0, 0.2], "label": 0},
+        ]
+        classifier.load_training_data(existing_data)
+
+        exported = classifier.export_training_data()
+
+        # Create new classifier and import
+        new_classifier = ActiveClassifier()
+        count = new_classifier.import_training_data(exported)
+
+        assert count == 2
+        assert new_classifier.stats.training_samples == 2
+
+    def test_record_decision_trigger_retrain_default_false(self):
+        """Test that trigger_retrain defaults to False (no inline retraining)."""
+        from core.active_learning import ActiveClassifier
+        from core.features import PairFeatures
+
+        classifier = ActiveClassifier()
+
+        # Load enough data to enable predictions
+        existing_data = [
+            {"features": [0.9, 0.8, 0.7, 0.9, 1.0, 1.0, 0.8], "label": 1},
+            {"features": [0.85, 0.75, 0.65, 0.85, 1.0, 1.0, 0.75], "label": 1},
+            {"features": [0.88, 0.78, 0.68, 0.88, 1.0, 0.0, 0.78], "label": 1},
+            {"features": [0.2, 0.1, 0.1, 0.5, 0.0, 0.0, 0.2], "label": 0},
+            {"features": [0.15, 0.05, 0.05, 0.4, 0.0, 0.0, 0.15], "label": 0},
+            {"features": [0.18, 0.08, 0.08, 0.45, 0.0, 0.0, 0.18], "label": 0},
+        ] * 5  # 30 samples
+        classifier.load_training_data(existing_data)
+
+        initial_fitted = classifier.learner.is_fitted
+
+        # Record a decision without trigger_retrain (default)
+        features = PairFeatures(
+            embedding_similarity=0.9,
+            token_jaccard=0.8,
+            trigram_jaccard=0.7,
+            desc_length_ratio=0.9,
+            same_category=True,
+            verb_match=True,
+            name_similarity=0.8,
+        )
+
+        item_a = {"id": "test_a", "description": "Test A"}
+        item_b = {"id": "test_b", "description": "Test B"}
+
+        # This should add the record but NOT retrain
+        result = classifier.record_decision(
+            item_a, item_b, features, is_match=True, llm_confidence=0.95
+        )
+
+        assert result is True
+        # Model state should be the same as before (no inline retrain)
+        assert classifier.learner.is_fitted == initial_fitted
