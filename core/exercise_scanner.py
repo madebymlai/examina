@@ -69,79 +69,84 @@ class VLMExtractionError(Exception):
 
 
 # System prompt for VLM
-EXERCISE_EXTRACTION_SYSTEM = """You are an expert exam document analyzer. Your task is to accurately extract hierarchical exercise structures. Think step-by-step with user-provided decision trees. Analyze the document structure carefully before extracting."""
+EXERCISE_EXTRACTION_SYSTEM = """You are an expert exam document analyzer. The first image is a FLOWCHART - follow it exactly to extract exercises from the exam pages that follow. Pay attention to the KEY DISTINCTIONS section in the flowchart."""
 
 # Prompt for VLM-based exercise extraction (Pass 1: structure + text, no context)
 EXERCISE_EXTRACTION_PROMPT = """Extract ALL exercises from these exam pages as a flat list.
 
-DECISION TREE - Apply to each item:
+Follow the FLOWCHART (first image) to classify each section. The exam pages follow after.
 
-Q1: "Does this start a NEW DISTINCT PROBLEM?"
-→ YES: Main exercise (1, 2, 3...)
-→ NO: Q2
+KEY DISTINCTIONS:
 
-Q2: "Does this GIVE INFORMATION to student (definitions, setup, given data)?"
-→ YES: Part of parent text
-→ NO: Q3
+| SUB-QUESTION (split these)                                        | NOT a sub-question (keep together)                              |
+|-------------------------------------------------------------------|-----------------------------------------------------------------|
+| SEPARATE TASKS requiring SEPARATE ANSWERS                         | GIVES information (setup, definitions)                          |
+| Each tests a DIFFERENT skill                                      | Same skill, different inputs/cases → ONE answer                 |
+| Asks to DO: Find, Calculate, Prove, Explain...                    | Multiple choice options (A/B/C/D)                               |
+| Can be marked: a), b), c), 1., 2., i), ii), -, etc.               | All parts contribute to ONE answer (ex. cases for shared table) |
+| Can be unmarked: separate tasks asking different things           |                                                                 |
+| Can be inline: "(a) ... (b) ..." or "Explain X... Calculate Y..." |                                                                 |
+| Can be nested: 1a, 1b or 1.1, 1.2... or on separate lines         |                                                                 |
 
-Q3: "Does this ask student to DO something (produce answer, calculation, drawing)?"
-→ YES: Sub-question (1.1, 1.2...)
-→ NO: Part of parent text
-
-RULES:
+OUTPUT RULES:
 - Parent text = FULL exercise block (intro + sub-questions + any text after)
-- Sub-questions can be marked: a), b), c), 1., 2., i), ii), -, •, or unmarked
-- NOT sub-questions: multiple choice options - treat as ONE exercise
-- END BEFORE: form fields, blank lines for answers, solutions, page headers/footers, junk, exam instructions
-- exercise_number: use hierarchical format (1, 1.1, 1.2) not document numbering
+- exercise_number: ALWAYS hierarchical format:
+  - Top-level: 1, 2, 3...
+  - Sub-questions: 1.1, 1.2, 1.3... (convert a→1, b→2, c→3, i→1, ii→2)
+  - Examples: "1a" → "1.1", "2b" → "2.2", "3(ii)" → "3.2"
 - page_number: 1-indexed
-- image_context: describe visual elements; null if none
+- image_context: describe visual elements, or null
 - Use LaTeX: $inline$ or $$block$$
-- Ignore solution sections
 
-Return valid JSON:
+Return ONLY valid JSON:
 {
   "exercises": [
-    {"exercise_number": "1", "text": "<full block>", "image_context": "<description or null>", "page_number": 1},
-    {"exercise_number": "1.1", "text": "<sub-question>", "page_number": 1},
-    {"exercise_number": "1.2", "text": "<sub-question>", "page_number": 1},
-    {"exercise_number": "2", "text": "<standalone>", "image_context": "<description or null>", "page_number": 2}
+    {"exercise_number": "1", "text": "<parent with full setup>", "image_context": "<description or null>", "page_number": 1},
+    {"exercise_number": "1.1", "text": "<sub-question task>", "page_number": 1},
+    {"exercise_number": "1.2", "text": "<sub-question task>", "page_number": 1},
+    {"exercise_number": "2", "text": "<standalone exercise>", "image_context": "<description or null>", "page_number": 2}
   ]
 }"""
 
 
 # Prompt for DeepSeek context extraction (Pass 2)
-CONTEXT_EXTRACTION_PROMPT_PARENT = """Extract the **shared context** that sub-questions need from this parent exercise.
+CONTEXT_EXTRACTION_SYSTEM = "You are a teaching assistant. You summarize and provide context from exercises."
 
-**Good context**: data values, parameters, scenario setup, definitions that sub-questions reference.
-Return **null** if sub-questions are **independent** and don't need shared info.
-**IMPORTANT**: Return context_summary in **ENGLISH**, even if source is another language.
+CONTEXT_EXTRACTION_PROMPT_PARENT = """Summarize this parent exercise so sub-questions make sense.
+
+TWO TYPES OF CONTEXT (return if EITHER applies):
+1. **Shared data**: values, parameters, scenario setup that subs reference
+2. **Parent question**: the task/instruction that applies to ALL sub-questions
+
+Return **null** if:
+- Each sub-question is a complete standalone question, OR
+- The parent only contains generic instructions without useful question data or context
+
+**IMPORTANT**: The context_summary should resemble an exercise that could be given in a test to make sense of sub-questions.
 
 PARENT EXERCISE:
 \"\"\"
 {exercise_text}
 \"\"\"
 
-Return JSON:
-{{"context_summary": "shared context in English" or null}}"""
+Return ONLY **VALID** JSON:
+{{"context_summary": "context in English" or null}}"""
 
-CONTEXT_EXTRACTION_PROMPT_STANDALONE = """Summarize this exercise for context.
+CONTEXT_EXTRACTION_PROMPT_STANDALONE = """Summarize this exercise.
 
 Focus on:
-- The **core skill/concept** being tested
-- Key **data values**, **parameters**, or given information
 - What the student must **DO**
+- Key **data values**, **parameters**, or given information
 
-Keep it **concise**.
-**IMPORTANT**: Return summary in **ENGLISH**, even if source is another language.
+**IMPORTANT**: The context_summary should resemble an exercise that could be given in a test.
 
 EXERCISE:
 \"\"\"
 {exercise_text}
 \"\"\"
 
-Return JSON:
-{{"context_summary": "concise exercise summary in English" or null}}"""
+Return ONLY **VALID** JSON:
+{{"context_summary": "context in English" or null}}"""
 
 
 def render_page_to_image(pdf_path: Path, page_num: int, dpi: int = 150) -> bytes:
@@ -191,12 +196,12 @@ def _get_context_summaries(
 
     from config import Config
 
-    api_key = Config.OPENROUTER_API_KEY
+    api_key = Config.DEEPSEEK_API_KEY
     if not api_key:
-        logger.warning("OPENROUTER_API_KEY not configured, skipping context extraction")
+        logger.warning("DEEPSEEK_API_KEY not configured, skipping context extraction")
         return {}
 
-    model = "deepseek/deepseek-chat-v3-0324"
+    model = Config.DEEPSEEK_MODEL or "deepseek-chat"
 
     results = {}
 
@@ -237,14 +242,17 @@ def _call_deepseek_for_context(
 
     try:
         response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            "https://api.deepseek.com/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [
+                    {"role": "system", "content": CONTEXT_EXTRACTION_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
                 "temperature": 0.0,
                 "max_tokens": 500,
             },
@@ -258,15 +266,102 @@ def _call_deepseek_for_context(
         # Parse JSON response
         json_match = re.search(r"\{[\s\S]*\}", text)
         if json_match:
-            data = json.loads(json_match.group())
+            json_str = json_match.group()
+            # Fix invalid backslash escapes (but don't double already-escaped ones)
+            # Match single backslash NOT followed by valid escape OR another backslash
+            json_str = re.sub(r'(?<!\\)\\(?!["\\/bfnrtu\\])', r'\\\\', json_str)
+            data = json.loads(json_str)
             summary = data.get("context_summary")
             if summary and summary != "null":
                 return summary
 
     except Exception as e:
         logger.warning(f"DeepSeek context extraction failed: {e}")
+        logger.debug(f"Raw response text: {text[:500] if 'text' in dir() else 'N/A'}")
 
     return None
+
+
+def _convert_single_sub_parents(
+    exercises: List[Dict[str, Any]],
+    logger,
+) -> tuple[List[Dict[str, Any]], set]:
+    """Convert single-sub parents to standalone exercises.
+
+    When VLM detects a parent with only 1 sub-question, it's likely a
+    misclassification. Merge parent+sub text and treat as standalone.
+
+    Returns:
+        Tuple of (updated exercises list, set of parent exercise numbers)
+    """
+    exercise_nums = {ex["exercise_number"] for ex in exercises}
+
+    # Identify parents (exercises that have sub-questions)
+    parent_nums = set()
+    for ex_num in exercise_nums:
+        if "." in ex_num:
+            parent_num = ex_num.rsplit(".", 1)[0]
+            if parent_num in exercise_nums:
+                parent_nums.add(parent_num)
+
+    # Count subs per parent
+    sub_counts: Dict[str, int] = {}
+    for ex_num in exercise_nums:
+        if "." in ex_num:
+            parent_num = ex_num.rsplit(".", 1)[0]
+            sub_counts[parent_num] = sub_counts.get(parent_num, 0) + 1
+
+    # Find parents with only 1 sub
+    single_sub_parents = {p for p, count in sub_counts.items() if count == 1}
+    if not single_sub_parents:
+        return exercises, parent_nums
+
+    logger.warning(
+        f"Found {len(single_sub_parents)} parent(s) with only 1 sub-question, "
+        f"converting to standalone: {single_sub_parents}"
+    )
+
+    # Build lookup of parent exercises
+    parent_lookup = {
+        ex["exercise_number"]: ex
+        for ex in exercises
+        if ex["exercise_number"] in single_sub_parents
+    }
+
+    # Merge parent+sub: use longer text, or combine if both have unique content
+    new_exercises = []
+    for ex in exercises:
+        ex_num = ex["exercise_number"]
+
+        if ex_num in single_sub_parents:
+            # Skip parent - handled when we process the sub
+            continue
+
+        if "." in ex_num:
+            parent_num = ex_num.rsplit(".", 1)[0]
+            if parent_num in single_sub_parents:
+                parent_ex = parent_lookup.get(parent_num, {})
+                parent_text = parent_ex.get("text", "")
+                sub_text = ex["text"]
+
+                # Use longer text, or combine if sub adds new content
+                if len(parent_text) > len(sub_text) * 1.5:
+                    ex["text"] = parent_text
+                elif sub_text not in parent_text and parent_text not in sub_text:
+                    ex["text"] = parent_text.rstrip() + "\n\n" + sub_text
+
+                # Inherit image_context from parent if sub doesn't have it
+                if not ex.get("image_context") and parent_ex.get("image_context"):
+                    ex["image_context"] = parent_ex["image_context"]
+
+                ex["exercise_number"] = parent_num  # 3.1 -> 3
+
+        new_exercises.append(ex)
+
+    # Remove single-sub parents from parent_nums
+    parent_nums -= single_sub_parents
+
+    return new_exercises, parent_nums
 
 
 def extract_exercises(
@@ -302,6 +397,7 @@ def extract_exercises(
     import base64
     import json
     import logging
+    import re
 
     import requests
 
@@ -332,7 +428,18 @@ def extract_exercises(
         resized_images.append(resized)
 
     # Build multi-image content for OpenRouter API
+    # Prepend flowchart image for visual instructions
+    flowchart_path = Path(__file__).parent / "assets" / "flowchart.png"
     content = [{"type": "text", "text": EXERCISE_EXTRACTION_PROMPT}]
+    if flowchart_path.exists():
+        with open(flowchart_path, "rb") as f:
+            flowchart_bytes = f.read()
+        flowchart_b64 = base64.b64encode(flowchart_bytes).decode("utf-8")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{flowchart_b64}"},
+        })
+    # Add exam page images
     for img_bytes in resized_images:
         b64 = base64.b64encode(img_bytes).decode("utf-8")
         content.append({
@@ -360,8 +467,8 @@ def extract_exercises(
                     {"role": "system", "content": EXERCISE_EXTRACTION_SYSTEM},
                     {"role": "user", "content": content},
                 ],
-                "temperature": 0.1,
-                "max_tokens": 8000,
+                "temperature": 0.0,
+                "max_tokens": 16000,
             },
             timeout=120,
         )
@@ -377,7 +484,7 @@ def extract_exercises(
     except (KeyError, IndexError) as e:
         raise VLMExtractionError(f"Unexpected API response format: {e}")
 
-    # Parse JSON from response (may be wrapped in markdown code block)
+    # Parse JSON from response (may be wrapped in markdown code block or have text around it)
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
@@ -386,9 +493,18 @@ def extract_exercises(
 
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON from VLM: {text[:500]}...")
-        raise VLMExtractionError(f"Invalid JSON response: {e}")
+    except json.JSONDecodeError:
+        # Try to extract JSON object from text (model may add explanatory text)
+        json_match = re.search(r'\{[\s\S]*\}', text)
+        if json_match:
+            try:
+                data = json.loads(json_match.group())
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON from VLM: {text[:500]}...")
+                raise VLMExtractionError(f"Invalid JSON response: {e}")
+        else:
+            logger.error(f"No JSON found in VLM response: {text[:500]}...")
+            raise VLMExtractionError("No JSON object found in response")
 
     exercises = data.get("exercises", [])
 
@@ -409,14 +525,8 @@ def extract_exercises(
 
     logger.info(f"VLM Pass 1: extracted {len(all_exercises)} exercises from {len(image_list)} page(s)")
 
-    # Identify parents (exercises that have sub-questions)
-    exercise_nums = {ex["exercise_number"] for ex in all_exercises}
-    parent_nums = set()
-    for ex_num in exercise_nums:
-        if "." in ex_num:
-            parent_num = ex_num.rsplit(".", 1)[0]
-            if parent_num in exercise_nums:
-                parent_nums.add(parent_num)
+    # Convert single-sub parents to standalone (handles misclassifications)
+    all_exercises, parent_nums = _convert_single_sub_parents(all_exercises, logger)
 
     # Pass 2: Get context from DeepSeek for parents and standalone
     parent_data = {}
