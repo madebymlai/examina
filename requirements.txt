@@ -1,23 +1,18 @@
-# PDF Processing (unified OCR pipeline)
-pymupdf>=1.23.0      # Image extraction
-pdf2image>=1.16.3    # Render pages for OCR
-pytesseract>=0.3.10  # OCR
+# PDF Processing
+pymupdf>=1.23.0      # PDF handling + image extraction
+pdf2image>=1.16.3    # Render pages for VLM
 Pillow>=10.1.0       # Image handling
 
-# Async HTTP for LLM calls
-aiohttp>=3.9.0
-aiofiles>=23.0.0
-
 # Utilities
-python-dateutil>=2.8.2
 pyyaml>=6.0.1
 
 # Spaced Repetition
-fsrs>=4.0.0  # FSRS algorithm (optimizer deps: torch, numpy, pandas already present)
+fsrs>=4.0.0
 
-# Active Learning
-httpx>=0.25.0                 # HTTP client for OpenRouter API
-numpy>=1.24.0                 # Array operations
+# Active Learning / ML
+httpx>=0.25.0        # HTTP client for OpenRouter API
+numpy>=1.24.0        # Array operations
+catboost>=1.2.0      # ML classifier
 
 # Development
 pytest>=7.4.3
